@@ -306,7 +306,7 @@ class RectifyWorker(QThread):
 
         for i, f in enumerate(files):
             self.progress.emit(f"Rectifying {i+1}/{len(files)}: {os.path.basename(f)}")
-            cmd = [sys.executable, os.path.join(os.getcwd(), 'rectify_raw_1d.py'), f, '--output', self.output_folder]
+            cmd = [sys.executable, os.path.join(os.getcwd(), 'step2_rectify.py'), f, '--output', self.output_folder]
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True)
                 if proc.stdout:
@@ -332,7 +332,7 @@ class PrepareWorker(QThread):
 
     def run(self):
         import subprocess, sys
-        cmd = [sys.executable, os.path.join(os.getcwd(), 'prepare_pairs_and_rename.py'), self.input_folder, '--project', self.project_name, '--output', self.output_dir]
+        cmd = [sys.executable, os.path.join(os.getcwd(), 'step1_sort.py'), self.input_folder, '--project', self.project_name, '--output', self.output_dir]
         self.progress.emit('Running: ' + ' '.join(cmd))
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -358,7 +358,7 @@ class AnalysisWorker(QThread):
 
     def run(self):
         import subprocess, sys
-        cmd = [sys.executable, os.path.join(os.getcwd(), 'measure_raw.py'), '--sorted', self.sorted_folder, '--output', self.output_folder]
+        cmd = [sys.executable, os.path.join(os.getcwd(), 'step3_analyze.py'), '--sorted', self.sorted_folder, '--output', self.output_folder]
         self.progress.emit('Running analysis: ' + ' '.join(cmd))
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True)

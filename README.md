@@ -1,82 +1,97 @@
-# Sony RAW Noise Detector
+# Sony Sensor Analysis Toolchain
 
-A Python tool to detect "baked-in" noise reduction (spatial filtering) in Sony RAW files (and potentially other camera brands).
+A complete suite for analyzing Sony RAW sensor performance (Read Noise, Gain, Dynamic Range) using a methodology aligned with *PhotonsToPhotos*.
 
-Many cameras apply irreversible noise reduction to RAW data before writing the file, often disguised as "RAW". This tool analyzes the spatial correlation of noise in **Dark Frames** to reveal if such filtering has occurred.
+## Overview
 
-## How it works
+This toolchain allows you to:
+1.  **Sort** RAW files into pairs (Dark frame + Chart frame) by ISO.
+2.  **Rectify** the chart images to detect the measurement grid.
+3.  **Analyze** the sensor data to compute:
+    *   **Read Noise** (in electrons and ADU).
+    *   **Gain** (e-/ADU).
+    *   **Photographic Dynamic Range (PDR)** (Normalized to 8MP Print).
 
-The tool performs a statistical analysis on the sensor noise:
-1.  **Dark Frame Cleaning**: Removes fixed pattern noise (Black Level offsets) and banding (row/column noise) to isolate random read noise.
-2.  **Lag-1 Correlation**: Calculates the correlation between adjacent pixels. In a true RAW file, pixel noise should be independent (correlation ≈ 0).
-3.  **2D Autocorrelation & FFT**: Visualizes the noise structure. A sharp single peak indicates pure noise; a blurry blob indicates spatial smoothing (NR).
+## Installation
 
-## Prerequisites
-
-- Python 3.8+
-- Dependencies listed in `requirements.txt`
-
-### Installation
-
-```bash
-pip install -r requirements.txt
-```
+1.  Clone the repository.
+2.  Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+    *(Requires: numpy, scipy, rawpy, opencv-python, matplotlib, PyQt6, pygame)*
 
 ## Usage
 
-1.  **Capture a Dark Frame**:
-    *   Put the lens cap on your camera.
-    *   Set your usual settings (ISO, Shutter Speed).
-    *   Take a picture (RAW format, e.g., `.ARW`).
-    *   *Note: The image must be completely black.*
-
-2.  **Run the GUI**:
-    ```bash
-    python sony_dark_frame_gui.py
-    ```
-
-3.  **Analyze**:
-    *   Click **Load RAW (.ARW)**.
-    *   Select your dark frame.
-    *   Wait for the analysis.
-
-## Interpreting Results
-
-| Metric | Value | Meaning |
-| :--- | :--- | :--- |
-| **Max Correlation** | `< 0.05` | **Clean RAW**. No significant spatial filtering detected. |
-| **Max Correlation** | `> 0.10` | **Baked-in NR**. The camera applied spatial smoothing. |
-| **Autocorrelation** | Sharp dot | White noise (Good). |
-| **Autocorrelation** | Blurry blob | Smoothed noise (Bad). |
-
-## Project Structure
-
-- `sony_dark_frame_gui.py`: Main application with Graphical User Interface.
-- `measure_v5.py`: Command-line script for batch analysis or debugging.
-- `sample/`: Folder containing sample `.ARW` files for testing.
-
-### Grid Detection & Rectification
-
-- `detect_grid_corners.py`: Detects grid intersections (morphology/Hough), outputs overlay and JSON.
-- `rectify_raw_1d.py`: Main rectifier, prefers intersection-based detection by default and falls back to 1D profiling.
-
-Quick commands:
-
+### 1. Display the Calibration Pattern
+Use the included tool to display the measurement grid on your screen.
 ```bash
-# detect intersections only
-python3 detect_grid_corners.py ip_test_chart.dng --cols 11 --rows 7 --out ip_test_chart.grid
-
-# rectify using intersection-based detection by default
-python3 rectify_raw_1d.py ip_test_chart.dng
-
-# Example: detect and rectify a 9x5 grid (valley peaks)
-```bash
-python3 rectify_raw_1d.py ip_test_chart.dng --cols 9 --rows 5 --no-intersections
+python3 tools_display_pattern.py
 ```
+*   **Space**: Toggle between the Grid and the Flat Field (Pink).
+*   **Esc**: Exit.
+
+### 2. Run the Analysis GUI
+Launch the main interface:
+```bash
+python3 SonySensorAnalysis.py
 ```
 
-Testing:
+### 3. Workflow Steps (in GUI)
 
-```bash
-python3 -m pytest tests/test_detection.py
-```
+1.  **Load Files**: Select the folder containing your RAW files (`.ARW`, `.DNG`, etc.).
+2.  **Choose Output**: Select a folder where results will be saved.
+3.  **Step 1: Sort**:
+    *   Organizes files into a `sorted/` folder.
+    *   Pairs them by ISO (e.g., `iso_100_chart.dng` and `iso_100_dark.dng`).
+4.  **Step 2: Rectify**:
+    *   Detects the 11x7 grid in the chart images.
+    *   Extracts measurement patches.
+5.  **Step 3: Analyze**:
+    *   Computes physics metrics (Green channel only).
+    *   Generates graphs for PDR, Read Noise, and Gain.
+
+---
+
+## How to Take the Photos (Crucial!)
+
+To get accurate results comparable to *PhotonsToPhotos*, you must follow this shooting protocol strictly.
+
+### Equipment
+*   **Camera**: Sony camera shooting in **Uncompressed RAW** (if available).
+*   **Lens**: A sharp lens (50mm or 85mm recommended).
+*   **Screen**: A high-quality monitor to display the grid.
+
+### Shooting Protocol
+
+For **EACH ISO** you want to measure (e.g., 100, 200, 400, 800, 1600, 3200, 6400, 12800), take **TWO** photos:
+
+#### 1. The Dark Frame (`_dark`)
+*   **Setup**: Put the lens cap ON. Cover the viewfinder if it's a DSLR.
+*   **Settings**: Same ISO and Shutter Speed as the Chart frame.
+*   **Goal**: Measure the electronic noise of the sensor in total darkness.
+
+#### 2. The Chart Frame (`_chart`)
+*   **Setup**: Display the grid using `tools_display_pattern.py`.
+*   **Framing**: Fill the frame with the grid. The 4 corner markers must be visible.
+*   **Focus**: **Slightly Defocus!** (This is important to blur the screen pixels/moiré without blurring the patch boundaries too much).
+*   **Exposure**:
+    *   Use the histogram.
+    *   Expose to the right (ETTR) but **DO NOT CLIP**.
+    *   The brightest patch (pink) should be near saturation but not white.
+*   **Goal**: Measure the photon transfer curve (Variance vs Signal) to determine Gain.
+
+### Tips for Accuracy
+*   **Avoid Screen Texture**: The biggest source of error is the "texture" of the screen pixels acting as noise. Defocusing helps. Using a high-resolution screen (Retina/4K) helps.
+*   **Uniformity**: Ensure the screen is uniformly lit (no reflections).
+*   **Stability**: Use a tripod.
+
+---
+
+## File Structure
+
+*   `SonySensorAnalysis.py`: Main GUI entry point.
+*   `step1_sort.py`: Renames and pairs files based on Exif data.
+*   `step2_rectify.py`: Computer vision script to find the grid.
+*   `step3_analyze.py`: Physics engine (P2P logic).
+*   `tools_display_pattern.py`: Pygame script to generate the target.
