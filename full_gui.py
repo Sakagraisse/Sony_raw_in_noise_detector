@@ -259,8 +259,7 @@ class RectifyGUI(QMainWindow):
                     data = json.load(f)
                 
                 isos = [d['iso'] for d in data]
-                edr = [d['edr'] for d in data]
-                pdr = [d['pdr'] for d in data]
+                pdr_print = [d.get('pdr_print', 0) for d in data]
                 rn_e = [d['rn_e'] for d in data]
                 rn_adu = [d['rn_adu'] for d in data]
                 gain = [d['gain'] for d in data]
@@ -268,15 +267,14 @@ class RectifyGUI(QMainWindow):
                 # Sort by ISO just in case
                 sorted_indices = np.argsort(isos)
                 isos = np.array(isos)[sorted_indices]
-                edr = np.array(edr)[sorted_indices]
-                pdr = np.array(pdr)[sorted_indices]
+                pdr_print = np.array(pdr_print)[sorted_indices]
                 rn_e = np.array(rn_e)[sorted_indices]
                 rn_adu = np.array(rn_adu)[sorted_indices]
                 gain = np.array(gain)[sorted_indices]
                 
                 if self.graph_widgets:
-                    # Plot EDR (Engineering DR) which is what we calculated before as PDR
-                    self.graph_widgets[0].plot_data(isos, edr, "ISO", "EDR (EV)", "Engineering Dynamic Range (SNR=1)")
+                    # Plot Print PDR (Normalized to 8MP)
+                    self.graph_widgets[0].plot_data(isos, pdr_print, "ISO", "PDR (EV)", "Photographic Dynamic Range (Print Normalized)")
                     self.graph_widgets[1].plot_data(isos, rn_e, "ISO", "Read Noise (e-)", "Read Noise (electrons)")
                     self.graph_widgets[2].plot_data(isos, rn_adu, "ISO", "Read Noise (ADU)", "Read Noise (ADU)")
                     self.graph_widgets[3].plot_data(isos, gain, "ISO", "Gain (e-/ADU)", "Gain")

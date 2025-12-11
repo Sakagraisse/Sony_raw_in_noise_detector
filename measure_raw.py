@@ -1,251 +1,262 @@
-import rawpy
-import numpy as np
+#!/usr/bin/env python3
+"""measure_raw.py
+
+Performs physics-based sensor analysis on RAW files.
+Inputs:
+  - Sorted RAW files (pairs of Dark + Chart)
+  - Grid geometry (json) from rectification step
+
+Outputs:
+  - JSON file with ISO, Read Noise, Gain, PDR metrics.
+
+Methodology aligned with PhotonsToPhotos:
+  - Uses Green channel only.
+  - Computes Pixel PDR (per pixel).
+  - Computes Print PDR (normalized to 8MP).
+"""
+
 import os
-import json
-import matplotlib.pyplot as plt
-from scipy.stats import linregress
-import argparse
 import sys
+import json
+import argparse
+import numpy as np
+import rawpy
+from scipy.stats import linregress
 
-def get_bayer_channel(raw, channel_index):
-    """
-    Extract a specific Bayer channel from the raw image.
-    0=Red, 1=Green1, 2=Blue, 3=Green2 (usually, depends on pattern)
-    Returns a 2D array of that channel's pixels.
-    """
-    # raw_image_visible is the full raw buffer.
-    # We need to slice it.
-    # Assuming standard RGGB or similar 2x2 pattern.
-    h, w = raw.raw_image_visible.shape
-    
-    # Determine offsets based on pattern
-    # raw.raw_pattern gives the pattern of the top-left 2x2 block.
-    # e.g. [[0, 1], [3, 2]] for RGGB
-    # We want to find coordinates (r, c) such that pattern[r%2, c%2] == channel_index
-    
-    pattern = raw.raw_pattern
-    start_r, start_c = -1, -1
-    
-    for r in range(2):
-        for c in range(2):
-            if pattern[r, c] == channel_index:
-                start_r, start_c = r, c
-                break
-        if start_r != -1: break
-        
-    if start_r == -1:
-        raise ValueError(f"Channel {channel_index} not found in pattern {pattern}")
-        
-    return raw.raw_image_visible[start_r::2, start_c::2].astype(np.float64)
+# Standard normalization target for "Print PDR" (approx 8MP, 8x10" @ 300ppi)
+TARGET_RES_MEGAPIXELS = 8.0 
 
-def compute_stats_in_patches(raw, centers_x, centers_y, patch_size=50):
+def get_green_pixels(raw, x, y, w, h):
     """
-    Compute Mean and Variance for the Green channel in each patch.
-    Using Green channel (usually index 1 or 3) as it has the most signal.
+    Extracts only Green pixels from the raw Bayer array within the bounding box.
     """
-    # Use Green1 (index 1)
-    # Note: Coordinates in centers_x/y are for the full image.
-    # The bayer channel image is half size.
+    # Ensure coordinates are within bounds
+    H, W = raw.raw_image_visible.shape
+    x = max(0, min(int(x), W-1))
+    y = max(0, min(int(y), H-1))
+    w = min(int(w), W - x)
+    h = min(int(h), H - y)
     
-    # Get Green channel
-    green = get_bayer_channel(raw, 1)
-    gh, gw = green.shape
+    if w <= 0 or h <= 0:
+        return np.array([])
+
+    # Extract the crop
+    crop = raw.raw_image_visible[y:y+h, x:x+w].astype(np.float64)
+    
+    # Get the color pattern mask for this crop
+    # raw.raw_colors is a matrix of 0,1,2,3 (R, G, B, G2)
+    crop_colors = raw.raw_colors[y:y+h, x:x+w]
+    
+    # Filter for Green pixels (usually index 1 and 3 in rawpy)
+    # Note: rawpy pattern: 0=Red, 1=Green, 2=Blue, 3=Green
+    green_mask = (crop_colors == 1) | (crop_colors == 3)
+    
+    return crop[green_mask]
+
+def robust_variance(data):
+    """
+    Computes variance robust to low-frequency texture (like screen pixels).
+    Uses the difference between adjacent pixels to estimate noise.
+    Var = E[ (x_i - x_{i+1})^2 ] / 2
+    """
+    if len(data) < 2:
+        return 0.0
+    # Since we extracted green pixels from a Bayer array, they are not strictly adjacent spatially 
+    # in a simple line, but treating them as a stream for difference estimation is a good approximation 
+    # for high-frequency noise vs low-frequency shading.
+    diffs = np.diff(data)
+    return np.mean(diffs**2) / 2.0
+
+def analyze_iso(iso, dark_path, chart_path, grid_json_path):
+    print(f"Analyzing ISO {iso}...")
+    
+    # 1. Analyze Dark Frame (Read Noise)
+    with rawpy.imread(dark_path) as raw:
+        # Use a central crop for Read Noise to avoid edge artifacts
+        H, W = raw.raw_image_visible.shape
+        cx, cy = W//2, H//2
+        cw, ch = 512, 512 # 512x512 center crop
+        
+        # Extract Green pixels only
+        dark_pixels = get_green_pixels(raw, cx-cw//2, cy-ch//2, cw, ch)
+        
+        # Read Noise in ADU (standard deviation of black)
+        rn_adu = np.std(dark_pixels)
+        
+        # Black Level (Pedestal)
+        black_level = np.mean(dark_pixels)
+        
+        # Saturation Level (White Level)
+        white_level = raw.white_level
+        
+        # Total Resolution for Normalization
+        total_pixels = W * H
+
+    # 2. Analyze Chart Frame (Gain & Full Well)
+    with open(grid_json_path, 'r') as f:
+        grid_info = json.load(f)
     
     means = []
     vars = []
     
-    half_size = patch_size // 2
-    
-    for cx, cy in zip(centers_x, centers_y):
-        # Map full coords to half-size coords
-        gx = cx / 2.0
-        gy = cy / 2.0
+    with rawpy.imread(chart_path) as raw:
+        # Use the inner rectangles defined in grid.json
+        # They are stored as [x, y, w, h] in "inner_rects" if available, 
+        # or we derive them from centers.
         
-        x0 = int(max(0, gx - half_size))
-        y0 = int(max(0, gy - half_size))
-        x1 = int(min(gw, gx + half_size))
-        y1 = int(min(gh, gy + half_size))
+        # Fallback size if not in JSON (approx 50px)
+        box_s = 50 
         
-        if x1 > x0 and y1 > y0:
-            roi = green[y0:y1, x0:x1]
-            means.append(np.mean(roi))
-            
-            # Robust variance estimation using difference of adjacent pixels
-            # Var = 0.5 * mean((x_i - x_{i+1})^2)
-            # This removes low-frequency gradients/texture
-            diffs = roi[:, :-1] - roi[:, 1:]
-            var_est = 0.5 * np.mean(diffs**2)
-            vars.append(var_est)
+        centers_x = grid_info.get('centers_x', [])
+        centers_y = grid_info.get('centers_y', [])
+        
+        for cy in centers_y:
+            for cx in centers_x:
+                # Extract Green pixels
+                pixels = get_green_pixels(raw, cx - box_s//2, cy - box_s//2, box_s, box_s)
+                
+                if len(pixels) < 10:
+                    continue
+                    
+                mu = np.mean(pixels) - black_level
+                v = robust_variance(pixels)
+                
+                # Filter clipped data (saturation) and too dark data
+                if 0 < mu < (white_level - black_level) * 0.95:
+                    means.append(mu)
+                    vars.append(v)
+
+    # 3. Compute Gain (Inverse slope of Variance vs Signal)
+    # Model: Var(ADU) = Gain(ADU/e-) * Signal(ADU) + ReadNoise(ADU)^2
+    # Slope = Gain(ADU/e-)
+    # We want Gain in e-/ADU, which is 1/Slope
+    if len(means) > 5:
+        slope, intercept, r_value, p_value, std_err = linregress(means, vars)
+        if slope > 0.001:
+            gain_e_adu = 1.0 / slope
         else:
-            means.append(0)
-            vars.append(0)
+            gain_e_adu = 0.0 # Invalid
             
-    return np.array(means), np.array(vars)
+        # Sanity check for gain
+        if gain_e_adu < 0.001: 
+            gain_e_adu = 0.001 # clamp
+    else:
+        gain_e_adu = 1.0 # Fallback
+        print("Warning: Not enough data points for Gain estimation.")
 
-def analyze_iso_pair(chart_path, dark_path, json_path):
-    print(f"Analyzing pair:\n  Chart: {os.path.basename(chart_path)}\n  Dark:  {os.path.basename(dark_path)}")
+    # 4. Compute Derived Metrics
     
-    # 1. Load Geometry
-    with open(json_path, 'r') as f:
-        geom = json.load(f)
-    centers_x = geom['centers_x']
-    centers_y = geom['centers_y']
-    
-    # 2. Analyze Dark Frame (Read Noise)
-    rn_adu = 0
-    black_level = 0
-    with rawpy.imread(dark_path) as raw_dark:
-        # Global Read Noise (std dev of the whole green channel)
-        # Or center patch? Global is usually more stable if no light leak.
-        green_dark = get_bayer_channel(raw_dark, 1)
-        
-        # Simple rejection of hot pixels?
-        # For now, simple std dev.
-        rn_adu = np.std(green_dark)
-        black_level = np.mean(green_dark)
-        white_level = raw_dark.white_level
-        
-    print(f"  Black Level: {black_level:.2f}, White Level: {white_level}")
-    print(f"  Read Noise (ADU): {rn_adu:.4f}")
-    
-    # 3. Analyze Chart Frame (Signal & Variance)
-    with rawpy.imread(chart_path) as raw_chart:
-        means, variances = compute_stats_in_patches(raw_chart, centers_x, centers_y, patch_size=40)
-        
-    # 4. Photon Transfer Curve (PTC)
-    # Model: Var = RN^2 + Gain^-1 * (Signal - Black)
-    # We plot Var vs (Mean - Black)
-    # Slope = 1/Gain
-    # Intercept should be close to RN^2 (from dark)
-    
-    signals = means - black_level
-    # Filter out saturated patches or too dark patches
-    valid_mask = (signals > 0) & (means < (white_level * 0.95))
-    
-    if np.sum(valid_mask) < 5:
-        print("  Not enough valid patches for PTC.")
-        return None
-
-    x_fit = signals[valid_mask]
-    y_fit = variances[valid_mask]
-    
-    # Linear regression
-    slope, intercept, r_value, p_value, std_err = linregress(x_fit, y_fit)
-    
-    # Save PTC plot
-    try:
-        plt.figure(figsize=(8, 6))
-        plt.scatter(x_fit, y_fit, alpha=0.5, label='Data')
-        plt.plot(x_fit, slope * x_fit + intercept, 'r-', label=f'Fit: y={slope:.2f}x + {intercept:.2f}')
-        plt.title(f"Photon Transfer Curve - ISO {os.path.basename(os.path.dirname(json_path)).split('_')[2]}")
-        plt.xlabel("Signal (ADU)")
-        plt.ylabel("Variance (ADU^2)")
-        plt.legend()
-        plt.grid(True)
-        plot_path = os.path.join(os.path.dirname(json_path), 'ptc_plot.png')
-        plt.savefig(plot_path)
-        plt.close()
-    except Exception as e:
-        print(f"Could not save plot: {e}")
-
-    gain_e_adu = 1.0 / slope if slope > 0 else 0
-    
-    print(f"  PTC Fit: Slope={slope:.4f}, Intercept={intercept:.2f}, R2={r_value**2:.4f}")
-    print(f"  Estimated Gain: {gain_e_adu:.4f} e-/ADU")
-    
-    # 5. Compute Metrics
-    # RN in electrons
+    # Read Noise in Electrons
     rn_e = rn_adu * gain_e_adu
     
-    # Full Well in electrons
-    full_well_e = (white_level - black_level) * gain_e_adu
+    # Full Well Capacity (e-)
+    # Max signal in ADU * Gain
+    full_well_adu = white_level - black_level
+    full_well_e = full_well_adu * gain_e_adu
     
-    # Engineering Dynamic Range (EDR) at SNR=1
-    # EDR = log2( FullWell / RN_e )
-    edr = np.log2(full_well_e / rn_e) if rn_e > 0 else 0
-    
-    # Photographic Dynamic Range (PDR) at SNR=20 (approximate)
-    # Solve S^2 - K^2 S - K^2 RN^2 = 0 for S (in electrons)
-    # S = (K^2 + sqrt(K^4 + 4 K^2 RN^2)) / 2
-    K = 20.0
+    # Engineering Dynamic Range (EDR) @ SNR=1
+    # log2(FullWell / ReadNoise_e)
     if rn_e > 0:
-        min_signal_e = (K**2 + np.sqrt(K**4 + 4 * (K**2) * (rn_e**2))) / 2.0
-        pdr = np.log2(full_well_e / min_signal_e)
+        edr = np.log2(full_well_e / rn_e)
     else:
-        pdr = 0
+        edr = 0
+        
+    # Photographic Dynamic Range (PDR) @ SNR=20
+    # This is the standard definition used by Bill Claff
+    # We look for the signal level S where S / Noise = 20
+    # Noise = sqrt(RN^2 + S*Gain) (Shot noise dominant usually)
+    # S / sqrt(RN_e^2 + S) = 20  (working in electrons)
+    # S^2 = 400 * (RN_e^2 + S)
+    # S^2 - 400*S - 400*RN_e^2 = 0
+    # Solve quadratic for S (Signal in electrons)
     
+    # ax^2 + bx + c = 0
+    a = 1
+    b = -400
+    c = -400 * (rn_e**2)
+    
+    delta = b**2 - 4*a*c
+    if delta >= 0:
+        s_target_e = (-b + np.sqrt(delta)) / (2*a)
+        # PDR is ratio of Saturation to this target signal
+        if s_target_e > 0:
+            pdr_pixel = np.log2(full_well_e / s_target_e)
+        else:
+            pdr_pixel = 0
+    else:
+        pdr_pixel = 0
+
+    # Normalization (Print PDR)
+    # Normalize to 8 Megapixels
+    norm_factor = np.log2(np.sqrt(total_pixels) / np.sqrt(TARGET_RES_MEGAPIXELS * 1e6))
+    pdr_print = pdr_pixel + norm_factor
+
     return {
-        "iso": None, # To be filled by caller
-        "rn_adu": rn_adu,
-        "gain": gain_e_adu,
-        "rn_e": rn_e,
-        "edr": edr,
-        "pdr": pdr,
-        "ptc_r2": r_value**2
+        "iso": int(iso),
+        "rn_adu": round(rn_adu, 4),
+        "gain": round(gain_e_adu, 4),
+        "rn_e": round(rn_e, 4),
+        "edr": round(edr, 2),
+        "pdr_pixel": round(pdr_pixel, 2),
+        "pdr_print": round(pdr_print, 2) # This is the "P2P" comparable value
     }
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--sorted', required=True, help='Path to sorted folder containing RAW pairs')
-    parser.add_argument('--output', required=True, help='Path to output folder containing grid.json files')
+    parser.add_argument('--sorted', required=True, help='Folder containing sorted raw files')
+    parser.add_argument('--output', required=True, help='Root output folder containing grid info')
     args = parser.parse_args()
-    
+
     results = []
     
-    # Iterate over output folders to find processed charts
-    for root, dirs, files in os.walk(args.output):
+    # Find ISOs
+    files = os.listdir(args.sorted)
+    isos = set()
+    for f in files:
+        if "_chart" in f or "_dark" in f:
+            parts = f.split('_iso_')
+            if len(parts) > 1:
+                iso_part = parts[1].split('_')[0]
+                if iso_part.isdigit():
+                    isos.add(int(iso_part))
+    
+    sorted_isos = sorted(list(isos))
+    
+    for iso in sorted_isos:
+        # Find pair
+        chart_f = None
+        dark_f = None
         for f in files:
-            if f.endswith('grid.json'):
-                # Found a processed chart
-                # Folder name is usually project_iso_XXX_chart
-                folder_name = os.path.basename(root)
-                json_path = os.path.join(root, f)
-                
-                # Parse ISO from folder name
-                # Expected: {project}_iso_{ISO}_chart
-                try:
-                    parts = folder_name.split('_')
-                    iso_idx = parts.index('iso')
-                    iso = int(parts[iso_idx + 1])
-                except:
-                    print(f"Could not parse ISO from {folder_name}")
-                    continue
-                
-                # Find corresponding RAW files in sorted folder
-                # We need a file ending in _iso_{ISO}_chart.dng and _iso_{ISO}_dark.dng
-                # We assume the project prefix matches or we just search by ISO tag
-                
-                chart_file = None
-                dark_file = None
-                
-                for sf in os.listdir(args.sorted):
-                    if f"_iso_{iso}_chart" in sf and sf.lower().endswith('.dng'):
-                        chart_file = os.path.join(args.sorted, sf)
-                    if f"_iso_{iso}_dark" in sf and sf.lower().endswith('.dng'):
-                        dark_file = os.path.join(args.sorted, sf)
-                        
-                if chart_file and dark_file:
-                    metrics = analyze_iso_pair(chart_file, dark_file, json_path)
-                    if metrics:
-                        metrics['iso'] = iso
-                        results.append(metrics)
-                else:
-                    print(f"Missing RAW pair for ISO {iso} in {args.sorted}")
-
-    # Sort by ISO
-    results.sort(key=lambda x: x['iso'])
-    
-    # Save results
-    out_json = os.path.join(args.output, 'analysis_results.json')
-    with open(out_json, 'w') as f:
-        json.dump(results, f, indent=2)
+            if f"iso_{iso}_chart" in f:
+                chart_f = os.path.join(args.sorted, f)
+            if f"iso_{iso}_dark" in f:
+                dark_f = os.path.join(args.sorted, f)
         
-    print(f"\nAnalysis complete. Results saved to {out_json}")
-    
-    # Print summary table
-    print(f"{'ISO':<8} {'RN(ADU)':<10} {'Gain':<10} {'RN(e-)':<10} {'EDR':<10} {'PDR':<10}")
-    for r in results:
-        print(f"{r['iso']:<8} {r['rn_adu']:<10.4f} {r['gain']:<10.4f} {r['rn_e']:<10.4f} {r['edr']:<10.2f} {r['pdr']:<10.2f}")
+        if chart_f and dark_f:
+            # Find grid json
+            # Assuming output structure: output/filename_chart/filename_chart.grid.json
+            # We need to reconstruct the folder name created by rectify_raw_1d
+            chart_basename = os.path.basename(chart_f)
+            chart_name_no_ext = os.path.splitext(chart_basename)[0]
+            
+            # rectify script creates folder based on filename without extension
+            grid_folder = os.path.join(args.output, chart_name_no_ext)
+            grid_json = os.path.join(grid_folder, chart_name_no_ext + ".grid.json")
+            
+            if os.path.exists(grid_json):
+                res = analyze_iso(iso, dark_f, chart_f, grid_json)
+                results.append(res)
+                print(f"ISO {iso}: Gain={res['gain']}, RN={res['rn_e']}e-, PDR(Print)={res['pdr_print']} EV")
+            else:
+                print(f"Grid not found for ISO {iso}: {grid_json}")
+        else:
+            print(f"Incomplete pair for ISO {iso}")
+
+    # Save results
+    out_path = os.path.join(args.output, 'analysis_results.json')
+    with open(out_path, 'w') as f:
+        json.dump(results, f, indent=4)
+    print(f"Saved analysis to {out_path}")
 
 if __name__ == "__main__":
     main()
