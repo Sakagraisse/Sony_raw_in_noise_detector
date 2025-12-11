@@ -379,25 +379,26 @@ def detect_grid_intersections(image_rgb, cols=11, rows=7):
     # Return sorted columns and rows and raw pts for overlay
     return ux_r.tolist(), uy_r.tolist(), (xs.tolist(), ys.tolist())
 
-def process_raw(raw_path, kernel_scale=0.35, iterations=1, cols=9, rows=5):
+def process_raw(raw_path, kernel_scale=0.35, iterations=1, cols=11, rows=7):
     print(f"Traitement de {raw_path} (Méthode Robust 1D)...")
     # Prepare output directory
     base_name = os.path.basename(raw_path)
     base_no_ext = os.path.splitext(base_name)[0]
     output_dir = os.path.join('output', base_no_ext)
     os.makedirs(output_dir, exist_ok=True)
-    # Move the RAW file into output_dir
+    # Copy the RAW file into output_dir (preserve original)
     dest_raw_path = os.path.join(output_dir, base_name)
     try:
-        if os.path.abspath(raw_path) != os.path.abspath(dest_raw_path) and os.path.exists(raw_path):
-            shutil.move(raw_path, dest_raw_path)
+        if os.path.abspath(raw_path) != os.path.abspath(dest_raw_path):
+            if not os.path.exists(dest_raw_path):
+                shutil.copy2(raw_path, dest_raw_path)
             raw_path = dest_raw_path
         elif not os.path.exists(raw_path) and os.path.exists(dest_raw_path):
-            # The file was probably already moved earlier; use the one in output_dir
+            # The file was probably already moved/copied earlier; use the one in output_dir
             raw_path = dest_raw_path
-            print(f"Using moved file {raw_path}")
+            print(f"Using existing file {raw_path}")
     except Exception as e:
-        print(f"Warning: could not move {raw_path} into {output_dir}: {e}")
+        print(f"Warning: could not copy {raw_path} into {output_dir}: {e}")
 
     with rawpy.imread(raw_path) as raw:
         rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=True)
@@ -464,12 +465,46 @@ def process_raw(raw_path, kernel_scale=0.35, iterations=1, cols=9, rows=5):
             centers_grid, (pw, ph) = compute_patch_grid(w, h, cols=cols, rows=rows)
             overlay_rectified = rectified.copy()
             overlay_debug = debug_img.copy()
-            # Outer rectangle in green, inner 20% smaller in blue
-            inner_scale = 0.8
+            # Outer rectangle in green, inner 30% smaller in blue (70% scale)
+            inner_scale = 0.7
             half_pw = pw / 2.0
             half_ph = ph / 2.0
             inner_half_pw = half_pw * inner_scale
             inner_half_ph = half_ph * inner_scale
+            
+            # Prepare extraction directory
+            patches_dir = os.path.join(output_dir, "extracted patches")
+            if os.path.exists(patches_dir):
+                shutil.rmtree(patches_dir)
+            os.makedirs(patches_dir, exist_ok=True)
+            
+            # Extract patches: Bottom-Right -> Left -> Up
+            patch_count = 1
+            for r in range(rows - 1, -1, -1):
+                for c in range(cols - 1, -1, -1):
+                    cx, cy = centers_grid[r, c]
+                    
+                    # Calculate inner rect coordinates
+                    tl_x = int(round(cx - inner_half_pw))
+                    tl_y = int(round(cy - inner_half_ph))
+                    br_x = int(round(cx + inner_half_pw))
+                    br_y = int(round(cy + inner_half_ph))
+                    
+                    # Clip to image bounds
+                    tl_x = max(0, tl_x)
+                    tl_y = max(0, tl_y)
+                    br_x = min(w, br_x)
+                    br_y = min(h, br_y)
+                    
+                    # Extract patch
+                    if br_x > tl_x and br_y > tl_y:
+                        patch_img = rectified[tl_y:br_y, tl_x:br_x]
+                        patch_filename = f"patch_{patch_count}.png"
+                        cv2.imwrite(os.path.join(patches_dir, patch_filename), cv2.cvtColor(patch_img, cv2.COLOR_RGB2BGR))
+                    
+                    patch_count += 1
+            print(f"Extracted {patch_count-1} patches to {patches_dir}")
+
             # Draw on rectified image
             for r in range(rows):
                 for c in range(cols):
@@ -529,7 +564,7 @@ if __name__ == "__main__":
     parser.add_argument('input', help='Input RAW file (DNG)')
     parser.add_argument('--kernel-scale', type=float, default=0.35, help='Morphology kernel scale relative to pitch (default: 0.35)')
     parser.add_argument('--iter', type=int, default=1, help='Morphology iterations (default: 1)')
-    parser.add_argument('--cols', type=int, default=9, help='Number of patch columns to detect (default: 9)')
-    parser.add_argument('--rows', type=int, default=5, help='Number of patch rows to detect (default: 5)')
+    parser.add_argument('--cols', type=int, default=11, help='Number of patch columns to detect (default: 11)')
+    parser.add_argument('--rows', type=int, default=7, help='Number of patch rows to detect (default: 7)')
     args = parser.parse_args()
     process_raw(args.input, kernel_scale=args.kernel_scale, iterations=args.iter, cols=args.cols, rows=args.rows)
