@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 import sys
 import os
+import json
 import numpy as np
 
 try:
@@ -44,6 +45,17 @@ class GraphWidget(QWidget):
             self.placeholder = QLabel(f"{title} (Matplotlib not available)")
             self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(self.placeholder)
+
+    def plot_data(self, x, y, xlabel, ylabel, title):
+        if not MATPLOTLIB_AVAILABLE:
+            return
+        self.ax.clear()
+        self.ax.plot(x, y, 'o-', linewidth=2)
+        self.ax.set_title(title)
+        self.ax.set_xlabel(xlabel)
+        self.ax.set_ylabel(ylabel)
+        self.ax.grid(True)
+        self.canvas.draw()
 
     def plot_random(self):
         if not MATPLOTLIB_AVAILABLE:
@@ -91,13 +103,19 @@ class RectifyGUI(QMainWindow):
         btn_choose.clicked.connect(self._choose_folder)
         btn_out = QPushButton("Choose Output Folder")
         btn_out.clicked.connect(self._choose_output_folder)
-        btn_process = QPushButton("Process")
+        btn_process = QPushButton("1. Sort")
         btn_process.clicked.connect(self._process_files)
+        btn_rectify = QPushButton("2. Rectify")
+        btn_rectify.clicked.connect(self._run_rectify)
+        btn_analyze = QPushButton("3. Analyze")
+        btn_analyze.clicked.connect(self._run_analysis)
         btn_clear = QPushButton("Clear")
         btn_clear.clicked.connect(self._clear_files)
         btn_box.addWidget(btn_choose)
         btn_box.addWidget(btn_out)
         btn_box.addWidget(btn_process)
+        btn_box.addWidget(btn_rectify)
+        btn_box.addWidget(btn_analyze)
         btn_box.addWidget(btn_clear)
         layout.addLayout(btn_box)
 
@@ -131,10 +149,11 @@ class RectifyGUI(QMainWindow):
         self.view_tabs = QTabWidget()
         layout.addWidget(self.view_tabs)
         self.graph_widgets = []
-        for idx in range(4):
-            gw = GraphWidget(title=f"Graph {idx+1}")
+        titles = ["PDR", "RN (e-)", "RN (ADU)", "Gain (e-/ADU)"]
+        for title in titles:
+            gw = GraphWidget(title=title)
             self.graph_widgets.append(gw)
-            self.view_tabs.addTab(gw, f"Graph {idx+1}")
+            self.view_tabs.addTab(gw, title)
 
     def _add_files(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Select files to load", os.getcwd(), "*.dng *.ARW *.jpg *.tiff *.png")
@@ -179,45 +198,117 @@ class RectifyGUI(QMainWindow):
         self.log_text.appendPlainText(txt)
 
     def _process_files(self):
-        # For now, processing means preparing pairs + copying to output folder using our script
-        # Use source_folder (selected via Choose Folder) as input
+        # 1. Sort / Prepare
         if not hasattr(self, 'source_folder') or self.source_folder is None:
             self._append_log("No source folder selected. Use 'Choose Folder' first.")
-            return
-        files = [self.file_list.item(i).text() for i in range(self.file_list.count())]
-        if not files:
-            self._append_log("No files to process.")
             return
         output_dir = getattr(self, 'output_dir', None)
         if output_dir is None:
             self._append_log("Output folder not set. Please choose it first.")
             return
+        
+        # Prepare outputs to output_dir/sorted
+        sorted_dir = os.path.join(output_dir, 'sorted')
         project_name = self.project_input.text().strip() or 'project'
-        # Use PrepareWorker to run prepare_pairs_and_rename.py on source folder
-        self.prepare_worker = PrepareWorker(self.source_folder, project_name, output_dir)
+        
+        self.prepare_worker = PrepareWorker(self.source_folder, project_name, sorted_dir)
         self.prepare_worker.progress.connect(self._append_log)
-        self.prepare_worker.finished.connect(lambda: self._append_log("Prepare finished."))
+        self.prepare_worker.finished.connect(lambda: self._append_log(f"Sorting finished. Files in {sorted_dir}"))
         self.prepare_worker.start()
 
+    def _run_rectify(self):
+        # 2. Rectify
+        output_dir = getattr(self, 'output_dir', None)
+        if output_dir is None:
+            self._append_log("Output folder not set.")
+            return
+            
+        sorted_dir = os.path.join(output_dir, 'sorted')
+        if not os.path.exists(sorted_dir):
+            self._append_log(f"Sorted folder not found: {sorted_dir}. Run 'Sort' first.")
+            return
 
-class ProcessWorker(QThread):
+        # Rectify outputs to output_dir (it creates subfolders per file)
+        self.rectify_worker = RectifyWorker(sorted_dir, output_dir)
+        self.rectify_worker.progress.connect(self._append_log)
+        self.rectify_worker.finished.connect(lambda: self._append_log("Rectification finished."))
+        self.rectify_worker.start()
+
+    def _run_analysis(self):
+        # 3. Analyze
+        output_dir = getattr(self, 'output_dir', None)
+        if output_dir is None:
+            self._append_log("Output folder not set.")
+            return
+            
+        sorted_dir = os.path.join(output_dir, 'sorted')
+        if not os.path.exists(sorted_dir):
+            self._append_log(f"Sorted folder not found: {sorted_dir}. Run 'Sort' first.")
+            return
+            
+        self.analysis_worker = AnalysisWorker(sorted_dir, output_dir)
+        self.analysis_worker.progress.connect(self._append_log)
+        self.analysis_worker.finished.connect(self._on_analysis_finished)
+        self.analysis_worker.start()
+
+    def _on_analysis_finished(self, results_path):
+        self._append_log(f"Analysis finished. Results in {results_path}")
+        if os.path.exists(results_path):
+            try:
+                with open(results_path, 'r') as f:
+                    data = json.load(f)
+                
+                isos = [d['iso'] for d in data]
+                edr = [d['edr'] for d in data]
+                pdr = [d['pdr'] for d in data]
+                rn_e = [d['rn_e'] for d in data]
+                rn_adu = [d['rn_adu'] for d in data]
+                gain = [d['gain'] for d in data]
+                
+                # Sort by ISO just in case
+                sorted_indices = np.argsort(isos)
+                isos = np.array(isos)[sorted_indices]
+                edr = np.array(edr)[sorted_indices]
+                pdr = np.array(pdr)[sorted_indices]
+                rn_e = np.array(rn_e)[sorted_indices]
+                rn_adu = np.array(rn_adu)[sorted_indices]
+                gain = np.array(gain)[sorted_indices]
+                
+                if self.graph_widgets:
+                    # Plot EDR (Engineering DR) which is what we calculated before as PDR
+                    self.graph_widgets[0].plot_data(isos, edr, "ISO", "EDR (EV)", "Engineering Dynamic Range (SNR=1)")
+                    self.graph_widgets[1].plot_data(isos, rn_e, "ISO", "Read Noise (e-)", "Read Noise (electrons)")
+                    self.graph_widgets[2].plot_data(isos, rn_adu, "ISO", "Read Noise (ADU)", "Read Noise (ADU)")
+                    self.graph_widgets[3].plot_data(isos, gain, "ISO", "Gain (e-/ADU)", "Gain")
+                    
+                self.tabs.setCurrentWidget(self.tab_view)
+                
+            except Exception as e:
+                self._append_log(f"Error loading results: {e}")
+
+
+class RectifyWorker(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal()
 
-    def __init__(self, files, output_dir, cols=11, rows=7, kernel_scale=0.35, iter=1):
+    def __init__(self, sorted_folder, output_folder):
         super().__init__()
-        self.files = files
-        self.output_dir = output_dir
-        self.cols = cols
-        self.rows = rows
-        self.kernel_scale = kernel_scale
-        self.iter = iter
+        self.sorted_folder = sorted_folder
+        self.output_folder = output_folder
 
     def run(self):
-        import subprocess, sys, shutil
-        for i, f in enumerate(self.files):
-            self.progress.emit(f"Processing {i+1}/{len(self.files)}: {f}")
-            cmd = [sys.executable, os.path.join(os.getcwd(), 'rectify_raw_1d.py'), f, '--cols', str(self.cols), '--rows', str(self.rows), '--kernel-scale', str(self.kernel_scale), '--iter', str(self.iter)]
+        import subprocess, sys, glob
+        # Find all chart files in sorted folder
+        pattern = os.path.join(self.sorted_folder, '*_chart.dng')
+        files = glob.glob(pattern)
+        if not files:
+            self.progress.emit(f"No chart files found in {self.sorted_folder}")
+            self.finished.emit()
+            return
+
+        for i, f in enumerate(files):
+            self.progress.emit(f"Rectifying {i+1}/{len(files)}: {os.path.basename(f)}")
+            cmd = [sys.executable, os.path.join(os.getcwd(), 'rectify_raw_1d.py'), f, '--output', self.output_folder]
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True)
                 if proc.stdout:
@@ -225,21 +316,9 @@ class ProcessWorker(QThread):
                         self.progress.emit(line)
                 if proc.stderr:
                     for line in proc.stderr.splitlines():
-                        self.progress.emit(line)
+                        self.progress.emit('ERR: ' + line)
             except Exception as e:
                 self.progress.emit(f"Error: {e}")
-            # Copy outputs from script-generated output dir to chosen output_dir if present
-            try:
-                base_no_ext = os.path.splitext(os.path.basename(f))[0]
-                script_out_dir = os.path.join('output', base_no_ext)
-                if os.path.exists(script_out_dir):
-                    dest = os.path.join(self.output_dir, base_no_ext)
-                    if os.path.exists(dest):
-                        shutil.rmtree(dest)
-                    shutil.copytree(script_out_dir, dest)
-                    self.progress.emit(f"Copied outputs to {dest}")
-            except Exception as e:
-                self.progress.emit(f"Copy outputs failed: {e}")
         self.finished.emit()
 
 
@@ -268,6 +347,34 @@ class PrepareWorker(QThread):
         except Exception as e:
             self.progress.emit('Error running prepare script: ' + str(e))
         self.finished.emit()
+
+
+class AnalysisWorker(QThread):
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(str)
+
+    def __init__(self, sorted_folder, output_folder):
+        super().__init__()
+        self.sorted_folder = sorted_folder
+        self.output_folder = output_folder
+
+    def run(self):
+        import subprocess, sys
+        cmd = [sys.executable, os.path.join(os.getcwd(), 'measure_raw.py'), '--sorted', self.sorted_folder, '--output', self.output_folder]
+        self.progress.emit('Running analysis: ' + ' '.join(cmd))
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.stdout:
+                for line in proc.stdout.splitlines():
+                    self.progress.emit(line)
+            if proc.stderr:
+                for line in proc.stderr.splitlines():
+                    self.progress.emit('ERR: ' + line)
+        except Exception as e:
+            self.progress.emit('Error running analysis script: ' + str(e))
+        
+        results_path = os.path.join(self.output_folder, 'analysis_results.json')
+        self.finished.emit(results_path)
 
 
 def main():

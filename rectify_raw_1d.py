@@ -375,12 +375,12 @@ def detect_grid_intersections(image_rgb, cols=11, rows=7):
     # Return sorted columns and rows and raw pts for overlay
     return ux_r.tolist(), uy_r.tolist(), (xs.tolist(), ys.tolist())
 
-def process_raw(raw_path, kernel_scale=0.35, iterations=1, cols=11, rows=7):
+def process_raw(raw_path, output_root='output', kernel_scale=0.35, iterations=1, cols=11, rows=7):
     print(f"Traitement de {raw_path} (Méthode Robust 1D)...")
     # Prepare output directory
     base_name = os.path.basename(raw_path)
     base_no_ext = os.path.splitext(base_name)[0]
-    output_dir = os.path.join('output', base_no_ext)
+    output_dir = os.path.join(output_root, base_no_ext)
     os.makedirs(output_dir, exist_ok=True)
     # Copy the RAW file into output_dir (preserve original)
     dest_raw_path = os.path.join(output_dir, base_name)
@@ -562,5 +562,6 @@ if __name__ == "__main__":
     parser.add_argument('--iter', type=int, default=1, help='Morphology iterations (default: 1)')
     parser.add_argument('--cols', type=int, default=11, help='Number of patch columns to detect (default: 11)')
     parser.add_argument('--rows', type=int, default=7, help='Number of patch rows to detect (default: 7)')
+    parser.add_argument('--output', default='output', help='Root output directory (default: output)')
     args = parser.parse_args()
-    process_raw(args.input, kernel_scale=args.kernel_scale, iterations=args.iter, cols=args.cols, rows=args.rows)
+    process_raw(args.input, output_root=args.output, kernel_scale=args.kernel_scale, iterations=args.iter, cols=args.cols, rows=args.rows)
