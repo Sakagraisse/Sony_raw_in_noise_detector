@@ -86,6 +86,26 @@ def analyze_iso(iso, dark_path, chart_path, grid_json_path):
         # Black Level (Pedestal)
         black_level = np.mean(dark_pixels)
         
+        # Check against metadata Black Level (Sanity Check)
+        # raw.black_level_per_channel usually returns a list of 4 values [R, G, B, G]
+        # We take the mean of the Green channels (indices 1 and 3 usually)
+        try:
+            meta_bl = raw.black_level_per_channel
+            if meta_bl:
+                # Average of Green channels if 4 values, else just take the value
+                if len(meta_bl) >= 4:
+                    meta_bl_green = (meta_bl[1] + meta_bl[3]) / 2.0
+                else:
+                    meta_bl_green = np.mean(meta_bl)
+                
+                # If difference is > 5% or > 10 ADU, warn user
+                diff = abs(black_level - meta_bl_green)
+                if diff > 10.0:
+                    print(f"  [WARNING] Measured Black Level ({black_level:.2f}) differs from Metadata ({meta_bl_green:.2f}) by {diff:.2f} ADU.")
+                    print("  -> Possible causes: Temperature drift, light leak in Dark frame, or metadata mismatch.")
+        except Exception as e:
+            pass # Metadata might not be available or standard
+
         # Saturation Level (White Level)
         white_level = raw.white_level
         
