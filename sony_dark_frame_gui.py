@@ -9,6 +9,7 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"
 import numpy as np
 import rawpy
 import matplotlib
+from scipy.stats import kurtosis, skew, norm
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -72,6 +73,32 @@ def compute_autocorr_2d(noise):
         R /= center
     return R, S
 
+def compute_radial_profile(spectrum_shifted):
+    """
+    Computes the radial profile of the 2D power spectrum.
+    Used to detect frequency cutoffs (Low Pass Filters).
+    """
+    y, x = np.indices(spectrum_shifted.shape)
+    center = np.array([x.shape[1] // 2, y.shape[0] // 2])
+    r = np.sqrt((x - center[0])**2 + (y - center[1])**2)
+    r = r.astype(int)
+
+    # Average intensity per radius
+    tbin = np.bincount(r.ravel(), spectrum_shifted.ravel())
+    nr = np.bincount(r.ravel())
+    radialprofile = tbin / np.maximum(nr, 1) # Avoid div by 0
+    return radialprofile
+
+def compute_histogram_stats(noise):
+    """
+    Computes Kurtosis and Skewness to check for Gaussianity.
+    Normal Gaussian: Kurtosis ~ 0 (Fisher), Skewness ~ 0.
+    """
+    data = noise.ravel()
+    k = kurtosis(data) # Fisher kurtosis (normal = 0)
+    s = skew(data)
+    return k, s
+
 def guess_noise_reduction(rho_x, rho_y, threshold=0.05):
     max_corr = max(abs(rho_x), abs(rho_y))
     if max_corr > threshold:
@@ -117,18 +144,30 @@ class AnalysisWorker(QThread):
             var_clean = np.mean(clean_noise**2)
             rho_x, rho_y = compute_lag1_correlations(clean_noise)
             verdict, max_corr = guess_noise_reduction(rho_x, rho_y)
+            
+            # Gaussianity Stats
+            self.log_signal.emit("Calculating Gaussianity stats (Kurtosis/Skewness)...")
+            kurt, skw = compute_histogram_stats(clean_noise)
 
             self.log_signal.emit("-" * 40)
             self.log_signal.emit(f"Noise Variance: {var_clean:.3f}")
             self.log_signal.emit(f"Horiz. Corr. (rho_x): {rho_x:.4f}")
             self.log_signal.emit(f"Vert. Corr.   (rho_y): {rho_y:.4f}")
             self.log_signal.emit(f"Max Corr: {max_corr:.4f}")
+            self.log_signal.emit(f"Kurtosis: {kurt:.4f} (Ideal: 0)")
+            self.log_signal.emit(f"Skewness: {skw:.4f} (Ideal: 0)")
             self.log_signal.emit(f"VERDICT: {verdict}")
             self.log_signal.emit("-" * 40)
 
             # FFT
             self.log_signal.emit("Calculating FFT and 2D Autocorrelation...")
             R_cl, S_cl = compute_autocorr_2d(clean_noise)
+            
+            # Radial Profile
+            self.log_signal.emit("Calculating Radial Spectral Power...")
+            S_shift = np.fft.fftshift(S_cl)
+            radial_prof = compute_radial_profile(S_shift)
+            
             self.log_signal.emit("FFT done. Preparing results...")
 
             # Packaging results
@@ -136,7 +175,11 @@ class AnalysisWorker(QThread):
                 "noise_img": clean_noise,
                 "autocorr": R_cl,
                 "spectrum": S_cl,
+                "radial_psd": radial_prof,
                 "var": var_clean,
+                "kurtosis": kurt,
+                "skewness": skw,
+                "max_corr": max_corr,
                 "verdict": verdict
             }
             self.log_signal.emit("Sending results to main thread...")
@@ -154,7 +197,7 @@ class MplCanvas(FigureCanvas):
     """Matplotlib Canvas integrated into Qt"""
     def __init__(self, parent=None, width=5, height=4, dpi=100):
         self.fig = Figure(figsize=(width, height), dpi=dpi)
-        self.axes = self.fig.subplots(1, 3)
+        self.axes = self.fig.subplots(2, 3)
         super(MplCanvas, self).__init__(self.fig)
         self.fig.tight_layout()
 
@@ -162,7 +205,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Sony Dark Frame Analyzer (Mode 2)")
-        self.resize(1200, 800)
+        self.resize(1400, 900) # Increased size for more plots
 
         # Main Widget
         main_widget = QWidget()
@@ -211,7 +254,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.console)
         
         # Space distribution (70% graph, 30% logs)
-        splitter.setSizes([600, 200])
+        splitter.setSizes([700, 200])
         
         layout.addWidget(splitter)
 
@@ -224,12 +267,16 @@ class MainWindow(QMainWindow):
         sb.setValue(sb.maximum())
 
     def clear_plots(self):
-        for ax in self.canvas.axes:
+        for ax in self.canvas.axes.flat:
             ax.clear()
             ax.axis('off')
-        self.canvas.axes[0].set_title("Image (Waiting)")
-        self.canvas.axes[1].set_title("Autocorr (Waiting)")
-        self.canvas.axes[2].set_title("Spectrum (Waiting)")
+        
+        self.canvas.axes[0, 0].set_title("Image (Waiting)")
+        self.canvas.axes[0, 1].set_title("Histogram (Waiting)")
+        self.canvas.axes[0, 2].set_title("Stats (Waiting)")
+        self.canvas.axes[1, 0].set_title("Autocorr (Waiting)")
+        self.canvas.axes[1, 1].set_title("Spectrum (Waiting)")
+        self.canvas.axes[1, 2].set_title("Radial PSD (Waiting)")
         self.canvas.draw()
 
     def load_file(self):
@@ -266,33 +313,63 @@ class MainWindow(QMainWindow):
         R = res['autocorr']
         S = res['spectrum']
         var = res['var']
+        rad = res['radial_psd']
+        kurt = res['kurtosis']
+        skw = res['skewness']
+        max_corr = res['max_corr']
 
         axs = self.canvas.axes
         
-        # 1. Noise Image
-        # Saturate display at +/- 3 sigma to see grain clearly
+        # 1. Noise Image (Top Left)
         sigma = np.sqrt(var)
-        im0 = axs[0].imshow(noise, cmap='gray', vmin=-3*sigma, vmax=3*sigma)
-        axs[0].set_title("Cleaned Noise (Destriped)")
-        axs[0].axis('off')
+        im0 = axs[0, 0].imshow(noise, cmap='gray', vmin=-3*sigma, vmax=3*sigma)
+        axs[0, 0].set_title("Cleaned Noise")
+        axs[0, 0].axis('off')
 
-        # 2. Autocorrelation
-        # Zoom a bit on center to see peak shape
+        # 2. Histogram (Top Middle)
+        axs[0, 1].clear()
+        axs[0, 1].hist(noise.ravel(), bins=100, density=True, alpha=0.6, color='g')
+        # Gaussian fit
+        mu, std = norm.fit(noise.ravel())
+        xmin, xmax = axs[0, 1].get_xlim()
+        x = np.linspace(xmin, xmax, 100)
+        p = norm.pdf(x, mu, std)
+        axs[0, 1].plot(x, p, 'k', linewidth=2)
+        axs[0, 1].set_title(f"Hist (K={kurt:.2f}, S={skw:.2f})")
+        axs[0, 1].axis('on')
+
+        # 3. Stats Text (Top Right)
+        axs[0, 2].clear()
+        axs[0, 2].axis('off')
+        text_str = (f"Variance: {var:.2f}\n"
+                    f"Sigma: {sigma:.2f}\n"
+                    f"Kurtosis: {kurt:.4f}\n"
+                    f"Skewness: {skw:.4f}\n"
+                    f"Max Corr: {max_corr:.4f}")
+        axs[0, 2].text(0.1, 0.5, text_str, fontsize=12, va='center')
+        axs[0, 2].set_title("Statistics")
+
+        # 4. Autocorrelation (Bottom Left)
         h, w = R.shape
-        zoom = 32 # Radius around center
+        zoom = 32
         cx, cy = w//2, h//2
         R_zoom = R[cy-zoom:cy+zoom, cx-zoom:cx+zoom]
+        im1 = axs[1, 0].imshow(R_zoom, cmap='viridis', extent=[-zoom, zoom, zoom, -zoom])
+        axs[1, 0].set_title("Autocorrelation")
         
-        im1 = axs[1].imshow(R_zoom, cmap='viridis', extent=[-zoom, zoom, zoom, -zoom])
-        axs[1].set_title("Autocorrelation (Center Zoom)")
-        # axs[1].axis('off') # Keep axes to see pixel scale
-
-        # 3. Spectrum
+        # 5. Spectrum (Bottom Middle)
         S_shift = np.fft.fftshift(S)
         S_log = np.log10(S_shift + 1e-12)
-        im2 = axs[2].imshow(S_log, cmap='inferno')
-        axs[2].set_title("Power Spectrum (Log)")
-        axs[2].axis('off')
+        im2 = axs[1, 1].imshow(S_log, cmap='inferno')
+        axs[1, 1].set_title("Power Spectrum")
+        axs[1, 1].axis('off')
+
+        # 6. Radial PSD (Bottom Right)
+        axs[1, 2].clear()
+        axs[1, 2].semilogy(rad)
+        axs[1, 2].set_title("Radial PSD")
+        axs[1, 2].grid(True, which="both", ls="-", alpha=0.5)
+        axs[1, 2].axis('on')
 
         self.canvas.fig.suptitle(f"Result: {res['verdict']}", fontsize=12, color='red' if "PROBABLE" in res['verdict'] else 'green')
         self.canvas.draw()
