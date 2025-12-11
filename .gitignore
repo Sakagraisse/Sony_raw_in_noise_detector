@@ -28,7 +28,6 @@ wheels/
 .DS_Store
 
 # Images / Data (Too large for git)
-*.ARW
 *.tif
 *.tiff
 *.jpg
