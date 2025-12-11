@@ -146,6 +146,13 @@ class RectifyGUI(QMainWindow):
 
     def _build_view_tab(self):
         layout = QVBoxLayout(self.tab_view)
+        
+        # Status Label for Warnings (Black Level, etc.)
+        self.status_label = QLabel("Status: Ready")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setStyleSheet("font-weight: bold; color: gray; border: 1px solid gray; padding: 5px; margin-bottom: 5px;")
+        layout.addWidget(self.status_label)
+        
         self.view_tabs = QTabWidget()
         layout.addWidget(self.view_tabs)
         self.graph_widgets = []
@@ -272,6 +279,20 @@ class RectifyGUI(QMainWindow):
                 rn_adu = np.array(rn_adu)[sorted_indices]
                 gain = np.array(gain)[sorted_indices]
                 
+                # Check for warnings
+                warnings = []
+                for d in data:
+                    if d.get('black_level_warning'):
+                        warnings.append(f"ISO {d['iso']}: {d['black_level_warning']}")
+                
+                if warnings:
+                    warn_text = "WARNING: Black Level Mismatch detected!\n" + "\n".join(warnings)
+                    self.status_label.setText(warn_text)
+                    self.status_label.setStyleSheet("font-weight: bold; color: white; background-color: #d9534f; border: 2px solid darkred; padding: 10px;")
+                else:
+                    self.status_label.setText("Status: Analysis OK (Black Levels match Metadata)")
+                    self.status_label.setStyleSheet("font-weight: bold; color: white; background-color: #5cb85c; border: 2px solid darkgreen; padding: 10px;")
+
                 if self.graph_widgets:
                     # Plot Print PDR (Normalized to 8MP)
                     self.graph_widgets[0].plot_data(isos, pdr_print, "ISO", "PDR (EV)", "Photographic Dynamic Range (Print Normalized)")
