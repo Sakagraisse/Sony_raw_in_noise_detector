@@ -74,9 +74,11 @@ def compute_patch_grid(target_w, target_h, cols=11, rows=7):
     return centers, (patch_w, patch_h)
 
 def robust_grid_fitting(profile, num_patches, image_dim, axis_name="X"):
-    # Try to detect PATCHES (Bright Peaks) instead of Gaps.
-    # Patches are wider and likely more robust in blurry images.
-    
+    # Mask edges (5%) to avoid artifacts
+    margin_mask = int(image_dim * 0.05)
+    profile[:margin_mask] = np.min(profile)
+    profile[-margin_mask:] = np.min(profile)
+
     # Normalize profile
     p_min, p_max = np.min(profile), np.max(profile)
     norm_profile = (profile - p_min) / (p_max - p_min + 1e-6)
@@ -84,19 +86,28 @@ def robust_grid_fitting(profile, num_patches, image_dim, axis_name="X"):
     # Prefer detecting valleys (drops of luminance)
     approx_pitch = image_dim / num_patches
     inv_profile = 1.0 - norm_profile
-    # First detect all valleys with relaxed constraints
-    all_valleys, valley_props = find_peaks(inv_profile, distance=3, prominence=0.01)
+    
+    # Use width constraint to filter noise (patches/gaps are wide)
+    # Gaps are narrow, Patches are wide.
+    # If we look for Gaps (valleys), width should be small or None.
+    # If we look for Patches (peaks), width should be large.
+    
+    # First detect all valleys with relaxed constraints (no width constraint for gaps)
+    all_valleys, valley_props = find_peaks(inv_profile, distance=max(3, approx_pitch * 0.3), prominence=0.01)
+    
     # If not many valleys, try a slightly stricter criteria but still prefer valleys
     if len(all_valleys) < max(3, num_patches // 2):
         all_valleys, valley_props = find_peaks(inv_profile, distance=max(3, approx_pitch * 0.3), prominence=0.02)
+    
     # Default we will use valleys (dips), fallback to peaks if no valleys found
     if len(all_valleys) >= 3:
         peaks = all_valleys
         properties = valley_props
         is_gaps = True
     else:
-        # Try bright peaks
-        all_peaks, peak_props = find_peaks(norm_profile, distance=max(3, approx_pitch * 0.3), prominence=0.02)
+        # Try bright peaks (Patches) - use width constraint here
+        min_width = approx_pitch * 0.2
+        all_peaks, peak_props = find_peaks(norm_profile, distance=max(3, approx_pitch * 0.3), prominence=0.02, width=min_width)
         if len(all_peaks) < 3:
             # Insufficient features
             peaks = np.array([], dtype=int)
@@ -141,57 +152,43 @@ def robust_grid_fitting(profile, num_patches, image_dim, axis_name="X"):
 
     slope, intercept, r_value, _, _ = linregress(valid_indices, valid_peaks)
     print(f"Fit {axis_name}: R2={r_value**2:.4f}, Slope={slope:.2f}")
-    if (r_value**2) < 0.05:
-        print(f"Warning: low fit quality for {axis_name} (R2={r_value**2:.4f})")
     
     # Reconstruct Grid Centers
-    # We need to identify which index corresponds to the center of the grid.
-    # The grid has 'num_patches' elements.
+    # We assume the grid is centered on the image.
     # Center index is (num_patches - 1) / 2.
-    
-    # We assume the detected grid is roughly centered on the screen/image.
-    # We find the shift that aligns the grid center to the image center.
-    
     grid_center_idx = (num_patches - 1) / 2.0
     
-    # Predicted pos of index 0 (relative to anchor)
+    # Calculate shift to align grid center to image center
     # pos(k) = slope * k + intercept
-    # We want to find 'shift' such that index 'k' corresponds to patch 'k + shift'.
-    # The center of the grid is at patch index 'grid_center_idx'.
-    # So we want pos(grid_center_idx - shift) ~ image_dim / 2
+    # We want pos(grid_center_idx - shift) ~ image_dim / 2
     
-    # slope * (grid_center_idx - shift) + intercept = image_dim / 2
-    # grid_center_idx - shift = (image_dim/2 - intercept) / slope
-    # shift = grid_center_idx - (image_dim/2 - intercept) / slope
+    # Calculate ideal shift (float)
+    ideal_shift = grid_center_idx - (image_dim / 2 - intercept) / slope
     
-    shift = int(round(grid_center_idx - (image_dim / 2 - intercept) / slope))
-    print(f"Shift {axis_name}: {shift}")
+    # Force shift to be the integer that puts the grid closest to center
+    # But also check if the "anchor" (index 0) is actually the center patch.
+    # If anchor is center patch, shift should be grid_center_idx.
+    # If anchor is center patch, intercept ~ image_dim / 2.
+    # ideal_shift = grid_center_idx - (0) = grid_center_idx.
+    
+    shift = int(round(ideal_shift))
+    print(f"Shift {axis_name}: {shift} (Ideal: {ideal_shift:.2f})")
+    
+    # Sanity check: if shift is wildly off, force it based on center assumption?
+    # If the detected grid is valid, the shift should be correct.
+    # The only ambiguity is if we missed so many peaks that we misidentified the anchor.
+    # But anchor is chosen as closest to center. So index 0 is always the "center-most detected peak".
+    # So shift should always map index 0 to a patch index near grid_center_idx.
     
     patch_centers = []
     
     if is_gaps:
-        # If we detected Gaps, we need to convert to Patch Centers.
-        # Gaps are at indices 0.5, 1.5 ... relative to patches.
-        # But here we just fitted a grid of points.
-        # Let's assume we found the internal gaps.
-        # There are num_patches - 1 internal gaps.
-        # Gap i is between Patch i and Patch i+1.
-        # Pos(Gap i) = Patch_Start + Pitch * (i + 0.5)
-        
-        # We fitted: Pos(k) = slope * k + intercept.
-        # We aligned so that the center of the GAP grid is at image center.
-        # Center of Gaps is (num_gaps - 1) / 2.
-        
-        # Let's recalculate shift for Gaps.
+        # Gaps logic
         num_gaps = num_patches - 1
         gap_center_idx = (num_gaps - 1) / 2.0
         shift_gaps = int(round(gap_center_idx - (image_dim / 2 - intercept) / slope))
         
         # Gap 0 pos (relative to anchor 0)
-        # gap_0_pos = slope * (0 - shift_gaps) + intercept
-        # This is the position of the first internal gap (between patch 0 and 1).
-        
-        # Patch 0 is at Gap 0 - Pitch/2.
         gap_0_pos = slope * (-shift_gaps) + intercept
         patch_0_pos = gap_0_pos - slope / 2.0
         
@@ -199,8 +196,7 @@ def robust_grid_fitting(profile, num_patches, image_dim, axis_name="X"):
             patch_centers.append(patch_0_pos + i * slope)
             
     else:
-        # We detected Patches directly.
-        # Patch 0 pos = slope * (0 - shift) + intercept
+        # Patches logic
         patch_0_pos = slope * (-shift) + intercept
         for i in range(num_patches):
             patch_centers.append(patch_0_pos + i * slope)
@@ -224,8 +220,8 @@ def detect_grid_1d_robust(image_rgb, cols=11, rows=7, save_prefix=None):
     profile_y = np.mean(strip_v, axis=1)
     
     # Lissage
-    profile_x = cv2.GaussianBlur(profile_x.reshape(1, -1), (25, 1), 0).flatten()
-    profile_y = cv2.GaussianBlur(profile_y.reshape(1, -1), (1, 25), 0).flatten()
+    profile_x = cv2.GaussianBlur(profile_x.reshape(1, -1), (51, 1), 0).flatten()
+    profile_y = cv2.GaussianBlur(profile_y.reshape(1, -1), (1, 51), 0).flatten()
     
     # 2. Robust Fitting
     patch_centers_x, peaks_x, inv_x = robust_grid_fitting(profile_x, cols, w, "X")
