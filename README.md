@@ -54,3 +54,29 @@ pip install -r requirements.txt
 - `sony_dark_frame_gui.py`: Main application with Graphical User Interface.
 - `measure_v5.py`: Command-line script for batch analysis or debugging.
 - `sample/`: Folder containing sample `.ARW` files for testing.
+
+### Grid Detection & Rectification
+
+- `detect_grid_corners.py`: Detects grid intersections (morphology/Hough), outputs overlay and JSON.
+- `rectify_raw_1d.py`: Main rectifier, prefers intersection-based detection by default and falls back to 1D profiling.
+
+Quick commands:
+
+```bash
+# detect intersections only
+python3 detect_grid_corners.py ip_test_chart.dng --cols 11 --rows 7 --out ip_test_chart.grid
+
+# rectify using intersection-based detection by default
+python3 rectify_raw_1d.py ip_test_chart.dng
+
+# Example: detect and rectify a 9x5 grid (valley peaks)
+```bash
+python3 rectify_raw_1d.py ip_test_chart.dng --cols 9 --rows 5 --no-intersections
+```
+```
+
+Testing:
+
+```bash
+python3 -m pytest tests/test_detection.py
+```
