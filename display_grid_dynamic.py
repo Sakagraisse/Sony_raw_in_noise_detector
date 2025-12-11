@@ -7,6 +7,7 @@ START_COLOR = (26, 11, 18)
 END_COLOR = (254, 151, 223)
 BG_COLOR = (255, 255, 255) # Fond blanc pour l'écran
 GRID_BG_COLOR = (0, 0, 0)  # Fond noir sous les patchs
+FLAT_COLOR = (212, 96, 146) # Couleur pour le flat field (P2P)
 
 # Grille
 COLS = 11
@@ -124,6 +125,8 @@ def main():
 
     # --- BOUCLE PRINCIPALE ---
     running = True
+    show_flat = True # Commence par le flat field
+
     while running:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -131,61 +134,68 @@ def main():
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
+                elif event.key == pygame.K_SPACE:
+                    show_flat = not show_flat
 
-        # 1. Fond
-        screen.fill(BG_COLOR)
-        
-        # 2. Fond noir de la grille (Guard bands)
-        grid_rect_x = offset_x + margin_x
-        grid_rect_y = offset_y + margin_y
-        pygame.draw.rect(screen, GRID_BG_COLOR, 
-                         (grid_rect_x, grid_rect_y, grid_area_w, grid_area_h))
-        
-        # 3. Dessin des patchs
-        current_patch = 0
-        for row in range(ROWS):
-            for col in range(COLS):
-                px = grid_rect_x + (col * (patch_w + patch_spacing))
-                py = grid_rect_y + (row * (patch_h + patch_spacing))
-                
-                color = interpolate_color(START_COLOR, END_COLOR, current_patch, TOTAL_PATCHES)
-                
-                # On utilise des float pour le calcul mais int pour l'affichage
-                # +1 sur la taille pour éviter les micro-lignes noires dues à l'arrondi si nécessaire
-                pygame.draw.rect(screen, color, (int(px), int(py), int(patch_w)+1, int(patch_h)+1))
-                
-                current_patch += 1
-                
-        # 4. Marqueurs (Coins + Orientation)
-        marker_radius = int(render_w * 0.0104) # ~40px sur 3840
-        small_marker_radius = int(marker_radius * 0.5)
-        
-        # Positions relatives au render_rect
-        corners = [
-            (offset_x + int(render_w * 0.026), offset_y + int(render_h * 0.046)), # HG
-            (offset_x + render_w - int(render_w * 0.026), offset_y + int(render_h * 0.046)), # HD
-            (offset_x + int(render_w * 0.026), offset_y + render_h - int(render_h * 0.046)), # BG
-            (offset_x + render_w - int(render_w * 0.026), offset_y + render_h - int(render_h * 0.046)) # BD
-        ]
-        
-        for cx, cy in corners:
-            pygame.draw.circle(screen, (0, 0, 0), (cx, cy), marker_radius)
+        if show_flat:
+            # Mode Flat Field
+            screen.fill(FLAT_COLOR)
+        else:
+            # Mode Grille
+            # 1. Fond
+            screen.fill(BG_COLOR)
             
-        # Marqueur Haut (Top Center)
-        top_cx = offset_x + render_w // 2
-        top_cy = offset_y + int(render_h * 0.046)
-        pygame.draw.circle(screen, (0, 0, 0), (top_cx, top_cy), small_marker_radius)
+            # 2. Fond noir de la grille (Guard bands)
+            grid_rect_x = offset_x + margin_x
+            grid_rect_y = offset_y + margin_y
+            pygame.draw.rect(screen, GRID_BG_COLOR, 
+                             (grid_rect_x, grid_rect_y, grid_area_w, grid_area_h))
+            
+            # 3. Dessin des patchs
+            current_patch = 0
+            for row in range(ROWS):
+                for col in range(COLS):
+                    px = grid_rect_x + (col * (patch_w + patch_spacing))
+                    py = grid_rect_y + (row * (patch_h + patch_spacing))
+                    
+                    color = interpolate_color(START_COLOR, END_COLOR, current_patch, TOTAL_PATCHES)
+                    
+                    # On utilise des float pour le calcul mais int pour l'affichage
+                    # +1 sur la taille pour éviter les micro-lignes noires dues à l'arrondi si nécessaire
+                    pygame.draw.rect(screen, color, (int(px), int(py), int(patch_w)+1, int(patch_h)+1))
+                    
+                    current_patch += 1
+                    
+            # 4. Marqueurs (Coins + Orientation)
+            marker_radius = int(render_w * 0.0104) # ~40px sur 3840
+            small_marker_radius = int(marker_radius * 0.5)
+            
+            # Positions relatives au render_rect
+            corners = [
+                (offset_x + int(render_w * 0.026), offset_y + int(render_h * 0.046)), # HG
+                (offset_x + render_w - int(render_w * 0.026), offset_y + int(render_h * 0.046)), # HD
+                (offset_x + int(render_w * 0.026), offset_y + render_h - int(render_h * 0.046)), # BG
+                (offset_x + render_w - int(render_w * 0.026), offset_y + render_h - int(render_h * 0.046)) # BD
+            ]
+            
+            for cx, cy in corners:
+                pygame.draw.circle(screen, (0, 0, 0), (cx, cy), marker_radius)
+                
+            # Marqueur Haut (Top Center)
+            top_cx = offset_x + render_w // 2
+            top_cy = offset_y + int(render_h * 0.046)
+            pygame.draw.circle(screen, (0, 0, 0), (top_cx, top_cy), small_marker_radius)
 
-        # Marqueur Droite (Right Center)
-        right_cx = offset_x + render_w - int(render_w * 0.026)
-        right_cy = offset_y + render_h // 2
-        pygame.draw.circle(screen, (0, 0, 0), (right_cx, right_cy), small_marker_radius)
-        
-        # 5. Damier de Focus
-        # On blit la surface pré-calculée
-        screen.blit(checker_surface, (checker_pos_x, checker_pos_y))
-        # Cadre autour du damier
-        pygame.draw.rect(screen, (0,0,0), (checker_pos_x-2, checker_pos_y-2, check_w+4, check_h+4), 2)
+            # Marqueur Droite (Right Center)
+            right_cx = offset_x + render_w - int(render_w * 0.026)
+            right_cy = offset_y + render_h // 2
+            pygame.draw.circle(screen, (0, 0, 0), (right_cx, right_cy), small_marker_radius)
+            
+            # 5. Damier de Focus
+            # On blit la surface pré-calculée
+            screen.blit(checker_surface, (checker_pos_x, checker_pos_y))
+            # Cadre autour du damier
+            pygame.draw.rect(screen, (0,0,0), (checker_pos_x-2, checker_pos_y-2, check_w+4, check_h+4), 2)
 
         pygame.display.flip()
 
