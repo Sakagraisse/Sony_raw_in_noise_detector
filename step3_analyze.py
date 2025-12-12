@@ -131,22 +131,33 @@ def analyze_iso(iso, dark_path, chart_path, grid_json_path):
         
         centers_x = grid_info.get('centers_x', [])
         centers_y = grid_info.get('centers_y', [])
+        centers = grid_info.get('centers', []) # List of [x, y] pairs
         
-        for cy in centers_y:
-            for cx in centers_x:
-                # Extract Green pixels
-                pixels = get_green_pixels(raw, cx - box_s//2, cy - box_s//2, box_s, box_s)
+        # Helper to process a patch
+        def process_patch(cx, cy):
+            # Extract Green pixels
+            pixels = get_green_pixels(raw, cx - box_s//2, cy - box_s//2, box_s, box_s)
+            
+            if len(pixels) < 10:
+                return
                 
-                if len(pixels) < 10:
-                    continue
-                    
-                mu = np.mean(pixels) - black_level
-                v = robust_variance(pixels)
-                
-                # Filter clipped data (saturation) and too dark data
-                if 0 < mu < (white_level - black_level) * 0.95:
-                    means.append(mu)
-                    vars.append(v)
+            mu = np.mean(pixels) - black_level
+            v = robust_variance(pixels)
+            
+            # Filter clipped data (saturation) and too dark data
+            if 0 < mu < (white_level - black_level) * 0.95:
+                means.append(mu)
+                vars.append(v)
+
+        if centers:
+            # Use explicit list of centers (e.g. from manual fit or perspective grid)
+            for cx, cy in centers:
+                process_patch(cx, cy)
+        else:
+            # Use separable grid (rows/cols)
+            for cy in centers_y:
+                for cx in centers_x:
+                    process_patch(cx, cy)
 
     # 3. Compute Gain (Inverse slope of Variance vs Signal)
     # Model: Var(ADU) = Gain(ADU/e-) * Signal(ADU) + ReadNoise(ADU)^2
