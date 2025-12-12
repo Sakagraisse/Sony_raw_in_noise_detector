@@ -125,7 +125,7 @@ def main():
 
     # --- BOUCLE PRINCIPALE ---
     running = True
-    show_flat = True # Commence par le flat field
+    display_mode = 0 # 0: Flat, 1: Grid Standard, 2: Grid Minimal (Black)
 
     while running:
         for event in pygame.event.get():
@@ -135,17 +135,23 @@ def main():
                 if event.key == pygame.K_ESCAPE:
                     running = False
                 elif event.key == pygame.K_SPACE:
-                    show_flat = not show_flat
+                    display_mode = (display_mode + 1) % 3
 
-        if show_flat:
+        if display_mode == 0:
             # Mode Flat Field
             screen.fill(FLAT_COLOR)
         else:
-            # Mode Grille
-            # 1. Fond
-            screen.fill(BG_COLOR)
+            # Mode Grille (Standard ou Minimal)
+            
+            if display_mode == 1:
+                # Mode Standard: Fond Blanc
+                screen.fill(BG_COLOR)
+            else:
+                # Mode Minimal: Fond Noir
+                screen.fill((0, 0, 0))
             
             # 2. Fond noir de la grille (Guard bands)
+            # En mode minimal, c'est noir sur noir, donc invisible mais pas gênant
             grid_rect_x = offset_x + margin_x
             grid_rect_y = offset_y + margin_y
             pygame.draw.rect(screen, GRID_BG_COLOR, 
@@ -165,37 +171,39 @@ def main():
                     pygame.draw.rect(screen, color, (int(px), int(py), int(patch_w)+1, int(patch_h)+1))
                     
                     current_patch += 1
-                    
-            # 4. Marqueurs (Coins + Orientation)
-            marker_radius = int(render_w * 0.0104) # ~40px sur 3840
-            small_marker_radius = int(marker_radius * 0.5)
             
-            # Positions relatives au render_rect
-            corners = [
-                (offset_x + int(render_w * 0.026), offset_y + int(render_h * 0.046)), # HG
-                (offset_x + render_w - int(render_w * 0.026), offset_y + int(render_h * 0.046)), # HD
-                (offset_x + int(render_w * 0.026), offset_y + render_h - int(render_h * 0.046)), # BG
-                (offset_x + render_w - int(render_w * 0.026), offset_y + render_h - int(render_h * 0.046)) # BD
-            ]
-            
-            for cx, cy in corners:
-                pygame.draw.circle(screen, (0, 0, 0), (cx, cy), marker_radius)
+            # Éléments supplémentaires UNIQUEMENT pour le mode Standard (1)
+            if display_mode == 1:
+                # 4. Marqueurs (Coins + Orientation)
+                marker_radius = int(render_w * 0.0104) # ~40px sur 3840
+                small_marker_radius = int(marker_radius * 0.5)
                 
-            # Marqueur Haut (Top Center)
-            top_cx = offset_x + render_w // 2
-            top_cy = offset_y + int(render_h * 0.046)
-            pygame.draw.circle(screen, (0, 0, 0), (top_cx, top_cy), small_marker_radius)
+                # Positions relatives au render_rect
+                corners = [
+                    (offset_x + int(render_w * 0.026), offset_y + int(render_h * 0.046)), # HG
+                    (offset_x + render_w - int(render_w * 0.026), offset_y + int(render_h * 0.046)), # HD
+                    (offset_x + int(render_w * 0.026), offset_y + render_h - int(render_h * 0.046)), # BG
+                    (offset_x + render_w - int(render_w * 0.026), offset_y + render_h - int(render_h * 0.046)) # BD
+                ]
+                
+                for cx, cy in corners:
+                    pygame.draw.circle(screen, (0, 0, 0), (cx, cy), marker_radius)
+                    
+                # Marqueur Haut (Top Center)
+                top_cx = offset_x + render_w // 2
+                top_cy = offset_y + int(render_h * 0.046)
+                pygame.draw.circle(screen, (0, 0, 0), (top_cx, top_cy), small_marker_radius)
 
-            # Marqueur Droite (Right Center)
-            right_cx = offset_x + render_w - int(render_w * 0.026)
-            right_cy = offset_y + render_h // 2
-            pygame.draw.circle(screen, (0, 0, 0), (right_cx, right_cy), small_marker_radius)
-            
-            # 5. Damier de Focus
-            # On blit la surface pré-calculée
-            screen.blit(checker_surface, (checker_pos_x, checker_pos_y))
-            # Cadre autour du damier
-            pygame.draw.rect(screen, (0,0,0), (checker_pos_x-2, checker_pos_y-2, check_w+4, check_h+4), 2)
+                # Marqueur Droite (Right Center)
+                right_cx = offset_x + render_w - int(render_w * 0.026)
+                right_cy = offset_y + render_h // 2
+                pygame.draw.circle(screen, (0, 0, 0), (right_cx, right_cy), small_marker_radius)
+                
+                # 5. Damier de Focus
+                # On blit la surface pré-calculée
+                screen.blit(checker_surface, (checker_pos_x, checker_pos_y))
+                # Cadre autour du damier
+                pygame.draw.rect(screen, (0,0,0), (checker_pos_x-2, checker_pos_y-2, check_w+4, check_h+4), 2)
 
         pygame.display.flip()
 

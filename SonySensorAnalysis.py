@@ -54,7 +54,20 @@ class GraphWidget(QWidget):
         self.ax.set_title(title)
         self.ax.set_xlabel(xlabel)
         self.ax.set_ylabel(ylabel)
-        self.ax.grid(True)
+        
+        # Use Log scale for ISO (X-axis)
+        if "ISO" in xlabel:
+            self.ax.set_xscale('log')
+            # Optional: Set ticks to match the actual ISO values present
+            self.ax.set_xticks(x)
+            self.ax.get_xaxis().set_major_formatter(lambda val, pos: str(int(val)))
+
+        # Use Log2 scale for Read Noise ADU (Y-axis)
+        if "Read Noise (ADU)" in title:
+            self.ax.set_yscale('log', base=2)
+            self.ax.get_yaxis().set_major_formatter(lambda val, pos: str(round(val, 2)))
+
+        self.ax.grid(True, which="both", ls="-", alpha=0.5)
         self.canvas.draw()
 
     def plot_random(self):
@@ -192,6 +205,12 @@ class RectifyGUI(QMainWindow):
                     path = os.path.join(root, f)
                     if not any(self.file_list.item(i).text() == path for i in range(self.file_list.count())):
                         self.file_list.addItem(path)
+        
+        # Auto-load existing results if present
+        res_path = os.path.join(folder, 'analysis_results.json')
+        if os.path.exists(res_path):
+            self._append_log(f"Found existing analysis_results.json in {folder}. Loading...")
+            self._on_analysis_finished(res_path)
         self._append_log(f"Loaded folder: {folder} ({self.file_list.count()} files)")
 
     def _choose_output_folder(self):

@@ -99,9 +99,9 @@ def analyze_iso(iso, dark_path, chart_path, grid_json_path):
                 else:
                     meta_bl_green = np.mean(meta_bl)
                 
-                # If difference is > 5% or > 10 ADU, warn user
+                # If difference is > 5% or > 25 ADU, warn user
                 diff = abs(black_level - meta_bl_green)
-                if diff > 10.0:
+                if diff > 25.0:
                     black_level_warning = f"Diff {diff:.2f} ADU (Meas {black_level:.1f} vs Meta {meta_bl_green:.1f})"
                     print(f"  [WARNING] Measured Black Level ({black_level:.2f}) differs from Metadata ({meta_bl_green:.2f}) by {diff:.2f} ADU.")
                     print("  -> Possible causes: Temperature drift, light leak in Dark frame, or metadata mismatch.")

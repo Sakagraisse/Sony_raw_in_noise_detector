@@ -167,77 +167,80 @@ def prepare_pairs(folder, project, output_dir=None, inplace=False, dry_run=False
     # Process groups
     renamed = []
     for iso, group in sorted(iso_groups.items()):
-        if len(group) == 1:
-            print(f'Only one file at ISO {iso}: {group[0]}; cannot form a pair.')
-            # still treat as chart (or unknown) - we'll call it chart
+        if len(group) < 2:
+            print(f'Skipping ISO {iso}: Only {len(group)} file found (need at least 1 Dark + 1 Chart). File: {os.path.basename(group[0])}')
+            continue
+            
         # Sort by brightness
         brightness = []
         for f in group:
             m, s = mean_raw_brightness(f)
             brightness.append((f, m if m is not None else 0.0, s if s is not None else 0.0))
-        # Sort ascending; darkest first. Use mean then std dev as tie breaker.
+        
+        # Sort ascending: Darkest first, Brightest last
         brightness.sort(key=lambda t: (t[1], t[2]))
-        # For each pair (two by two), tag dark (lowest mean) and chart (highest mean)
-        i = 0
-        while i < len(brightness):
-            if i + 1 < len(brightness):
-                dark_file, dark_mean, _ = brightness[i]
-                chart_file, chart_mean, _ = brightness[i+1]
-                i += 2
-            else:
-                # odd one leftover
-                dark_file, dark_mean, _ = brightness[i]
-                chart_file = None
-                i += 1
+        
+        # Strategy: Take the absolute darkest as Dark, and absolute brightest as Chart
+        # Ignore anything in between (redundant shots)
+        dark_file, dark_mean, _ = brightness[0]
+        chart_file, chart_mean, _ = brightness[-1]
+        
+        # Safety check: ensure they are actually different files (should be covered by len < 2 check but good to be safe)
+        if dark_file == chart_file:
+             print(f'Skipping ISO {iso}: Dark and Chart are the same file (brightness analysis failed?).')
+             continue
 
-            # Create renamed names
-            base = project
-            if chart_file:
-                ext = os.path.splitext(chart_file)[1]
-                new_chart_name = f"{base}_iso_{iso}_chart{ext}"
-            else:
-                new_chart_name = None
-            ext_d = os.path.splitext(dark_file)[1]
-            new_dark_name = f"{base}_iso_{iso}_dark{ext_d}"
+        # Create renamed names
+        base = project
+        ext_c = os.path.splitext(chart_file)[1]
+        new_chart_name = f"{base}_iso_{iso}_chart{ext_c}"
+        
+        ext_d = os.path.splitext(dark_file)[1]
+        new_dark_name = f"{base}_iso_{iso}_dark{ext_d}"
 
-            # Perform action
-            if dry_run:
-                print(f'[DRY] would rename/copy: dark: {dark_file} -> {new_dark_name}')
-                if chart_file:
-                    print(f'[DRY] would rename/copy: chart: {chart_file} -> {new_chart_name}')
+        # Perform action
+        if dry_run:
+            print(f'[DRY] ISO {iso}:')
+            print(f'  Dark : {os.path.basename(dark_file)} -> {new_dark_name}')
+            print(f'  Chart: {os.path.basename(chart_file)} -> {new_chart_name}')
+            if len(group) > 2:
+                print(f'  (Ignored {len(group)-2} other files for this ISO)')
+        else:
+            if inplace:
+                # Rename in place
+                try:
+                    os.rename(dark_file, os.path.join(os.path.dirname(dark_file), new_dark_name))
+                    renamed.append((dark_file, new_dark_name))
+                    print(f'Renamed: {os.path.basename(dark_file)} -> {new_dark_name}')
+                except Exception as e:
+                    print('Could not rename', dark_file, e)
+                
+                try:
+                    os.rename(chart_file, os.path.join(os.path.dirname(chart_file), new_chart_name))
+                    renamed.append((chart_file, new_chart_name))
+                    print(f'Renamed: {os.path.basename(chart_file)} -> {new_chart_name}')
+                except Exception as e:
+                    print('Could not rename', chart_file, e)
             else:
-                if inplace:
-                    # Rename in place
-                    try:
-                        os.rename(dark_file, os.path.join(os.path.dirname(dark_file), new_dark_name))
-                        renamed.append((dark_file, new_dark_name))
-                        print(f'Renamed: {dark_file} -> {new_dark_name}')
-                    except Exception as e:
-                        print('Could not rename', dark_file, e)
-                    if chart_file:
-                        try:
-                            os.rename(chart_file, os.path.join(os.path.dirname(chart_file), new_chart_name))
-                            renamed.append((chart_file, new_chart_name))
-                            print(f'Renamed: {chart_file} -> {new_chart_name}')
-                        except Exception as e:
-                            print('Could not rename', chart_file, e)
-                else:
-                    # Copy to output_dir
-                    try:
-                        dst1 = os.path.join(output_dir, new_dark_name)
-                        shutil.copy2(dark_file, dst1)
-                        renamed.append((dark_file, dst1))
-                        print(f'Copied: {dark_file} -> {dst1}')
-                    except Exception as e:
-                        print('Could not copy', dark_file, e)
-                    if chart_file:
-                        try:
-                            dst2 = os.path.join(output_dir, new_chart_name)
-                            shutil.copy2(chart_file, dst2)
-                            renamed.append((chart_file, dst2))
-                            print(f'Copied: {chart_file} -> {dst2}')
-                        except Exception as e:
-                            print('Could not copy', chart_file, e)
+                # Copy to output_dir
+                try:
+                    dst1 = os.path.join(output_dir, new_dark_name)
+                    shutil.copy2(dark_file, dst1)
+                    renamed.append((dark_file, dst1))
+                    print(f'Copied: {os.path.basename(dark_file)} -> {new_dark_name}')
+                except Exception as e:
+                    print('Could not copy', dark_file, e)
+                
+                try:
+                    dst2 = os.path.join(output_dir, new_chart_name)
+                    shutil.copy2(chart_file, dst2)
+                    renamed.append((chart_file, dst2))
+                    print(f'Copied: {os.path.basename(chart_file)} -> {new_chart_name}')
+                except Exception as e:
+                    print('Could not copy', chart_file, e)
+            
+            if len(group) > 2:
+                print(f'  (Ignored {len(group)-2} redundant files for ISO {iso})')
 
     print('\nDone.')
     return renamed
