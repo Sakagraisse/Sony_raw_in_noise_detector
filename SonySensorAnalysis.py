@@ -52,12 +52,46 @@ class InteractiveImageWidget(QWidget):
         self.setMouseTracking(True)
         self.scale_factor = 1.0
         self.offset = QPointF(0, 0)
+        
+        # Pre-compute theoretical geometry for preview
+        if step2_rectify:
+            self.dst_markers, (W, H) = step2_rectify.get_theoretical_markers(3840, 2160)
+            centers, _ = step2_rectify.compute_patch_grid(W, H, cols=11, rows=7)
+            self.dst_grid_centers = centers.reshape(-1, 2) # (77, 2)
+            self.grid_rows = 7
+            self.grid_cols = 11
+        else:
+            self.dst_markers = None
 
     def set_image(self, image_path):
         self.image_path = image_path
-        # Load image using cv2 to ensure correct orientation/format if needed, then convert to QImage
-        # Or just QImage directly. QImage is easier.
-        self.image = QImage(image_path)
+        if not image_path or not os.path.exists(image_path):
+            self.pixmap = None
+            self.update()
+            return
+
+        # Load image using cv2 to apply auto-exposure for display
+        img = cv2.imread(image_path)
+        if img is None:
+            self.pixmap = None
+            self.update()
+            return
+            
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # Auto-exposure (Simple normalization)
+        # Map 1st percentile to 0 and 99th to 255 to stretch contrast
+        try:
+            vmin, vmax = np.percentile(img, (1, 99))
+            if vmax > vmin:
+                img = np.clip((img.astype(np.float32) - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
+        except Exception:
+            pass # Fallback to original if percentile fails
+            
+        h, w, ch = img.shape
+        bytes_per_line = ch * w
+        self.image = QImage(img.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        
         if self.image.isNull():
             self.pixmap = None
         else:
@@ -111,6 +145,49 @@ class InteractiveImageWidget(QWidget):
 
         # Draw Corners and Grid
         if len(self.corners) == 4:
+            # Draw Grid Preview (Dynamic)
+            if self.dst_markers is not None:
+                src_markers = np.array([[p.x(), p.y()] for p in self.corners], dtype=np.float32)
+                try:
+                    H, _ = cv2.findHomography(src_markers, self.dst_markers)
+                    H_inv = np.linalg.inv(H)
+                    
+                    # Transform grid centers
+                    dst_pts = self.dst_grid_centers.reshape(-1, 1, 2).astype(np.float32)
+                    src_grid = cv2.perspectiveTransform(dst_pts, H_inv).reshape(self.grid_rows, self.grid_cols, 2)
+                    
+                    # Draw grid lines
+                    painter.setPen(QPen(QColor(255, 255, 0, 128), 1)) # Yellow, semi-transparent
+                    
+                    # Draw rows
+                    for r in range(self.grid_rows):
+                        pts = []
+                        for c in range(self.grid_cols):
+                            pt = QPointF(src_grid[r, c, 0], src_grid[r, c, 1])
+                            pts.append(self._map_from_image(pt))
+                        for i in range(len(pts)-1):
+                            painter.drawLine(pts[i], pts[i+1])
+                            
+                    # Draw cols
+                    for c in range(self.grid_cols):
+                        pts = []
+                        for r in range(self.grid_rows):
+                            pt = QPointF(src_grid[r, c, 0], src_grid[r, c, 1])
+                            pts.append(self._map_from_image(pt))
+                        for i in range(len(pts)-1):
+                            painter.drawLine(pts[i], pts[i+1])
+                            
+                    # Draw centers as small dots
+                    painter.setBrush(QBrush(QColor(255, 255, 0, 128)))
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    for r in range(self.grid_rows):
+                        for c in range(self.grid_cols):
+                            pt = QPointF(src_grid[r, c, 0], src_grid[r, c, 1])
+                            painter.drawEllipse(self._map_from_image(pt), 2, 2)
+
+                except Exception:
+                    pass
+
             # Map corners to widget coords
             pts = [self._map_from_image(c) for c in self.corners]
             
@@ -202,9 +279,9 @@ class ManualFitTab(QWidget):
         self.btn_refresh.clicked.connect(self.refresh_list)
         left_layout.addWidget(self.btn_refresh)
         
-        self.btn_save = QPushButton("Save & Recalculate Grid")
-        self.btn_save.clicked.connect(self._save_grid)
-        left_layout.addWidget(self.btn_save)
+        self.btn_update = QPushButton("Update Photo & Recalculate")
+        self.btn_update.clicked.connect(self._save_and_update)
+        left_layout.addWidget(self.btn_update)
         
         # Right: Interactive Image
         self.image_widget = InteractiveImageWidget()
@@ -230,8 +307,6 @@ class ManualFitTab(QWidget):
             return
             
         # Look for subfolders in output_dir that contain .grid.json
-        # Structure: output_dir/filename_chart/filename_chart.grid.json
-        # Or just list all folders
         try:
             items = sorted(os.listdir(self.output_dir))
             for item in items:
@@ -249,19 +324,16 @@ class ManualFitTab(QWidget):
         folder_path = os.path.join(self.output_dir, folder_name)
         
         # Try to find a preview image
-        # step2 saves: base_no_ext + ".debug_grid.jpg"
-        # or ".rectified_preview.jpg"
-        # or ".rectified_overlay.jpg"
-        
-        debug_img = os.path.join(folder_path, folder_name + ".debug_grid.jpg")
-        if not os.path.exists(debug_img):
-            # Fallback to raw? No, too slow.
-            # Maybe check for other jpgs
-            debug_img = os.path.join(folder_path, folder_name + ".rectified_overlay.jpg")
+        # Priority: source_preview.jpg (clean) -> debug_grid.jpg (old default) -> rectified_overlay.jpg
+        preview_img = os.path.join(folder_path, folder_name + ".source_preview.jpg")
+        if not os.path.exists(preview_img):
+            preview_img = os.path.join(folder_path, folder_name + ".debug_grid.jpg")
+        if not os.path.exists(preview_img):
+            preview_img = os.path.join(folder_path, folder_name + ".rectified_overlay.jpg")
             
-        if os.path.exists(debug_img):
-            self.image_widget.set_image(debug_img)
-            self.current_chart_path = debug_img
+        if os.path.exists(preview_img):
+            self.image_widget.set_image(preview_img)
+            self.current_chart_path = preview_img
         else:
             print("No preview image found.")
             self.image_widget.set_image(None)
@@ -272,12 +344,36 @@ class ManualFitTab(QWidget):
             with open(self.current_json_path, 'r') as f:
                 data = json.load(f)
                 
-            corners = data.get('homography_corners')
-            if corners:
-                self.image_widget.set_corners(corners)
+            # Check if we have explicitly saved markers (from a previous manual fit)
+            markers = data.get('markers')
+            if markers:
+                self.image_widget.set_corners(markers)
             else:
-                # Infer from centers if possible, or default
-                self._set_default_corners()
+                # We only have 'homography_corners' which are likely the GRID corners from auto-detection
+                grid_corners = data.get('homography_corners')
+                if grid_corners and step2_rectify:
+                    # Convert Grid Corners -> Markers
+                    # 1. Compute H that maps src_grid_corners -> dst_grid_corners
+                    src_grid = np.array(grid_corners, dtype=np.float32)
+                    dst_grid, (W, H_dim) = step2_rectify.get_theoretical_patch_centers(3840, 2160)
+                    
+                    H_mat, _ = cv2.findHomography(src_grid, dst_grid)
+                    
+                    # 2. Get theoretical markers
+                    dst_markers, _ = step2_rectify.get_theoretical_markers(3840, 2160)
+                    
+                    # 3. Map dst_markers -> src_markers using inv(H)
+                    try:
+                        H_inv = np.linalg.inv(H_mat)
+                        dst_markers_reshaped = dst_markers.reshape(-1, 1, 2)
+                        src_markers = cv2.perspectiveTransform(dst_markers_reshaped, H_inv)
+                        src_markers = src_markers.reshape(-1, 2).tolist()
+                        self.image_widget.set_corners(src_markers)
+                    except Exception as e:
+                        print(f"Error projecting markers: {e}")
+                        self.image_widget.set_corners(grid_corners) # Fallback
+                else:
+                    self._set_default_corners()
         else:
             self._set_default_corners()
 
@@ -294,18 +390,16 @@ class ManualFitTab(QWidget):
 
     def _save_grid(self):
         if not self.current_json_path or not step2_rectify:
-            return
+            return False
             
         corners = self.image_widget.get_corners()
-        src_pts = np.array(corners, dtype=np.float32)
+        src_markers = np.array(corners, dtype=np.float32)
         
-        # 1. Compute Homography
-        # We need theoretical destination points (rectified grid corners)
-        # step2_rectify.get_theoretical_patch_centers returns (pts, dims)
-        # We assume standard 3840x2160 render target as per step2
-        dst_pts, (W_target, H_target) = step2_rectify.get_theoretical_patch_centers(3840, 2160, cols=11, rows=7)
+        # 1. Compute Homography based on MARKERS
+        # Get theoretical markers
+        dst_markers, (W_target, H_target) = step2_rectify.get_theoretical_markers(3840, 2160)
         
-        H, _ = cv2.findHomography(src_pts, dst_pts)
+        H, _ = cv2.findHomography(src_markers, dst_markers)
         
         # 2. Compute all patch centers
         # Get theoretical grid centers
@@ -322,7 +416,7 @@ class ManualFitTab(QWidget):
             H_inv = np.linalg.inv(H)
         except np.linalg.LinAlgError:
             print("Homography inversion failed")
-            return
+            return False
 
         # Transform points
         # cv2.perspectiveTransform expects (N, 1, 2)
@@ -337,21 +431,42 @@ class ManualFitTab(QWidget):
         except:
             data = {}
             
-        data['homography_corners'] = corners
-        data['centers'] = src_centers.tolist() # Save explicit list of centers
-        
-        # Also update centers_x / centers_y for compatibility if possible, 
-        # but since it might be distorted, they are less useful. 
-        # We'll just save them as averages of rows/cols to be safe-ish?
-        # Actually, step3 now prefers 'centers', so we are good.
+        # Save markers so we can reload them correctly next time
+        data['markers'] = corners
+        # Save centers for analysis
+        data['centers'] = src_centers.tolist() 
         
         with open(self.current_json_path, 'w') as f:
             json.dump(data, f, indent=2)
             
         print(f"Saved updated grid to {self.current_json_path}")
-        
-        # Optional: Trigger re-analysis or visual feedback?
-        # For now just print.
+        return True
+
+    def _save_and_update(self):
+        if self._save_grid():
+            # Trigger regeneration
+            if step2_rectify and hasattr(step2_rectify, 'regenerate_artifacts'):
+                print("Regenerating artifacts...")
+                # We need the original raw file path. It's usually in the JSON or we can infer it.
+                # The JSON has 'raw_file' usually?
+                try:
+                    with open(self.current_json_path, 'r') as f:
+                        data = json.load(f)
+                    raw_file = data.get('raw_file')
+                    if raw_file and os.path.exists(raw_file):
+                        chart_output_dir = os.path.dirname(self.current_json_path)
+                        step2_rectify.regenerate_artifacts(raw_file, self.current_json_path, chart_output_dir)
+                        print("Regeneration complete.")
+                        # Reload image to show new overlay if we were showing the overlay
+                        # But we are showing the source preview now, so maybe just flash a message?
+                        # Or reload the file list item to refresh status?
+                        self._on_file_selected(self.file_list.currentItem())
+                    else:
+                        print(f"Could not find raw file: {raw_file}")
+                except Exception as e:
+                    print(f"Error during regeneration: {e}")
+            else:
+                print("Regeneration function not available in step2_rectify")
 
 
 class GraphWidget(QWidget):

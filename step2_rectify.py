@@ -45,6 +45,36 @@ def get_theoretical_patch_centers(target_w, target_h, cols=11, rows=7):
     
     return np.array([p_tl, p_tr, p_br, p_bl], dtype=np.float32), (int(W_render), int(H_render))
 
+def get_theoretical_markers(target_w, target_h):
+    """
+    Renvoie les coordonnées théoriques (pixels) des 4 marqueurs (cercles noirs) aux coins.
+    Basé sur tools_display_pattern.py
+    """
+    # On suppose que target_w/h correspondent à la résolution de rendu (ex: 3840x2160)
+    # Si ce n'est pas le cas, il faudrait adapter, mais ici on travaille en coordonnées normalisées 3840x2160
+    W_render = 3840.0
+    H_render = 2160.0
+    
+    # Ratios extraits de tools_display_pattern.py
+    # corners = [
+    #     (offset_x + int(render_w * 0.026), offset_y + int(render_h * 0.046)), # HG
+    #     (offset_x + render_w - int(render_w * 0.026), offset_y + int(render_h * 0.046)), # HD
+    #     (offset_x + int(render_w * 0.026), offset_y + render_h - int(render_h * 0.046)), # BG
+    #     (offset_x + render_w - int(render_w * 0.026), offset_y + render_h - int(render_h * 0.046)) # BD
+    # ]
+    
+    # offset_x/y sont 0 pour 16:9
+    
+    x_margin = W_render * 0.026
+    y_margin = H_render * 0.046
+    
+    p_tl = [x_margin, y_margin]
+    p_tr = [W_render - x_margin, y_margin]
+    p_br = [W_render - x_margin, H_render - y_margin]
+    p_bl = [x_margin, H_render - y_margin]
+    
+    return np.array([p_tl, p_tr, p_br, p_bl], dtype=np.float32), (int(W_render), int(H_render))
+
 
 def compute_patch_grid(target_w, target_h, cols=11, rows=7):
     """Return all patch centers (rows x cols x 2) and patch size (w,h) in target coordinates."""
@@ -413,6 +443,11 @@ def process_raw(raw_path, output_root='output', kernel_scale=0.35, iterations=1,
             return
             
         w, h = dims
+        # Save clean source preview (for manual fit GUI)
+        source_preview_filename = base_no_ext + ".source_preview.jpg"
+        source_preview_path = os.path.join(output_dir, source_preview_filename)
+        cv2.imwrite(source_preview_path, cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+        
         # Preview
         rectified = cv2.warpPerspective(rgb, H, (w, h))
         preview_filename = base_no_ext + ".rectified_preview.jpg"
@@ -550,10 +585,139 @@ def process_raw(raw_path, output_root='output', kernel_scale=0.35, iterations=1,
             overlay_rectified_path = os.path.join(output_dir, base_no_ext + '.rectified_overlay.jpg')
             overlay_debug_path = os.path.join(output_dir, base_no_ext + '.debug_overlay.jpg')
             cv2.imwrite(overlay_rectified_path, cv2.cvtColor(overlay_rectified, cv2.COLOR_RGB2BGR))
-            cv2.imwrite(overlay_debug_path, cv2.cvtColor(overlay_debug, cv2.COLOR_RGB2BGR))
-            print(f"Saved overlays: {overlay_rectified_path}, {overlay_debug_path}")
         except Exception as e:
-            print("Could not produce overlays:", e)
+            print(f"Error creating overlays: {e}")
+
+def regenerate_artifacts(raw_path, grid_json_path, output_dir, cols=11, rows=7):
+    """
+    Regenerates rectified artifacts (TIFF, debug images, patches) using a fixed grid from JSON.
+    Used by the Manual Fit GUI to update results after manual correction.
+    """
+    print(f"Regenerating artifacts for {raw_path} using {grid_json_path}...")
+    
+    # Load JSON
+    with open(grid_json_path, 'r') as f:
+        grid_data = json.load(f)
+        
+    # We need H. 
+    # If we have markers, we compute H from markers.
+    # If we have homography_corners (grid corners), we compute H from grid corners.
+    
+    H = None
+    W_target, H_target = 3840, 2160 # Default
+    
+    if 'markers' in grid_data:
+        src_markers = np.array(grid_data['markers'], dtype=np.float32)
+        dst_markers, (W_target, H_target) = get_theoretical_markers(3840, 2160)
+        H, _ = cv2.findHomography(src_markers, dst_markers)
+    elif 'homography_corners' in grid_data:
+        src_pts = np.array(grid_data['homography_corners'], dtype=np.float32)
+        dst_pts, (W_target, H_target) = get_theoretical_patch_centers(3840, 2160, cols=cols, rows=rows)
+        H, _ = cv2.findHomography(src_pts, dst_pts)
+        
+    if H is None:
+        print("Could not determine Homography from JSON data.")
+        return
+
+    base_name = os.path.basename(raw_path)
+    base_no_ext = os.path.splitext(base_name)[0]
+    
+    with rawpy.imread(raw_path) as raw:
+        rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=True)
+        w, h = W_target, H_target
+        
+        # 1. Rectified Preview
+        rectified = cv2.warpPerspective(rgb, H, (w, h))
+        preview_filename = base_no_ext + ".rectified_preview.jpg"
+        preview_path = os.path.join(output_dir, preview_filename)
+        cv2.imwrite(preview_path, cv2.cvtColor(rectified, cv2.COLOR_RGB2BGR))
+        
+        # 2. Debug Grid Image (Source with overlay)
+        debug_img = rgb.copy()
+        # We can draw the grid on it
+        # ... (reuse logic if needed, or just skip drawing lines since we have the overlay image)
+        
+        # 3. RAW Rectification
+        raw_image = raw.raw_image_visible
+        ch1 = raw_image[0::2, 0::2]
+        ch2 = raw_image[0::2, 1::2]
+        ch3 = raw_image[1::2, 0::2]
+        ch4 = raw_image[1::2, 1::2]
+        stack = np.dstack((ch1, ch2, ch3, ch4))
+        
+        S = np.array([[2.0, 0, 0], [0, 2.0, 0], [0, 0, 1.0]])
+        H_stack = H @ S
+        
+        rectified_stack = cv2.warpPerspective(stack, H_stack, (w, h), flags=cv2.INTER_LINEAR)
+        
+        out_filename = base_no_ext + ".rectified.tiff"
+        out_path = os.path.join(output_dir, out_filename)
+        tifffile.imwrite(out_path, rectified_stack, photometric='rgb')
+        print(f"Saved rectified TIFF: {out_path}")
+        
+        # 4. Overlays & Patches
+        try:
+            centers_grid, (pw, ph) = compute_patch_grid(w, h, cols=cols, rows=rows)
+            overlay_rectified = rectified.copy()
+            overlay_debug = rgb.copy() # Clean source
+            
+            inner_scale = 0.7
+            half_pw = pw / 2.0
+            half_ph = ph / 2.0
+            inner_half_pw = half_pw * inner_scale
+            inner_half_ph = half_ph * inner_scale
+            
+            # Patches
+            patches_dir = os.path.join(output_dir, "extracted patches")
+            if os.path.exists(patches_dir):
+                shutil.rmtree(patches_dir)
+            os.makedirs(patches_dir, exist_ok=True)
+            
+            patch_count = 1
+            for r in range(rows - 1, -1, -1):
+                for c in range(cols - 1, -1, -1):
+                    cx, cy = centers_grid[r, c]
+                    tl_x = int(round(cx - inner_half_pw))
+                    tl_y = int(round(cy - inner_half_ph))
+                    br_x = int(round(cx + inner_half_pw))
+                    br_y = int(round(cy + inner_half_ph))
+                    tl_x = max(0, tl_x); tl_y = max(0, tl_y)
+                    br_x = min(w, br_x); br_y = min(h, br_y)
+                    
+                    if br_x > tl_x and br_y > tl_y:
+                        patch_img = rectified[tl_y:br_y, tl_x:br_x]
+                        cv2.imwrite(os.path.join(patches_dir, f"patch_{patch_count}.png"), cv2.cvtColor(patch_img, cv2.COLOR_RGB2BGR))
+                    patch_count += 1
+            
+            # Draw on Rectified
+            for r in range(rows):
+                for c in range(cols):
+                    cx, cy = centers_grid[r, c]
+                    cv2.rectangle(overlay_rectified, (int(cx-half_pw), int(cy-half_ph)), (int(cx+half_pw), int(cy+half_ph)), (0, 255, 0), 2)
+                    cv2.rectangle(overlay_rectified, (int(cx-inner_half_pw), int(cy-inner_half_ph)), (int(cx+inner_half_pw), int(cy+inner_half_ph)), (255, 0, 0), 2)
+            
+            # Draw on Source (Inverse Transform)
+            H_inv = np.linalg.inv(H)
+            for r in range(rows):
+                for c in range(cols):
+                    cx, cy = centers_grid[r, c]
+                    corners_outer = np.array([[cx-half_pw, cy-half_ph], [cx+half_pw, cy-half_ph], [cx+half_pw, cy+half_ph], [cx-half_pw, cy+half_ph]], dtype=np.float32)
+                    corners_inner = np.array([[cx-inner_half_pw, cy-inner_half_ph], [cx+inner_half_pw, cy-inner_half_ph], [cx+inner_half_pw, cy+inner_half_ph], [cx-inner_half_pw, cy+inner_half_ph]], dtype=np.float32)
+                    
+                    pts_outer = cv2.perspectiveTransform(corners_outer.reshape(-1, 1, 2), H_inv).reshape(-1, 2).astype(np.int32)
+                    pts_inner = cv2.perspectiveTransform(corners_inner.reshape(-1, 1, 2), H_inv).reshape(-1, 2).astype(np.int32)
+                    
+                    cv2.polylines(overlay_debug, [pts_outer], True, (0, 255, 0), 2)
+                    cv2.polylines(overlay_debug, [pts_inner], True, (255, 0, 0), 2)
+            
+            overlay_rectified_path = os.path.join(output_dir, base_no_ext + '.rectified_overlay.jpg')
+            overlay_debug_path = os.path.join(output_dir, base_no_ext + '.debug_overlay.jpg') # Overwrite debug overlay
+            cv2.imwrite(overlay_rectified_path, cv2.cvtColor(overlay_rectified, cv2.COLOR_RGB2BGR))
+            cv2.imwrite(overlay_debug_path, cv2.cvtColor(overlay_debug, cv2.COLOR_RGB2BGR))
+            print(f"Regenerated overlays: {overlay_rectified_path}")
+            
+        except Exception as e:
+            print(f"Error regenerating overlays: {e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Rectify RAW using 1D or intersection-based grid detection')
