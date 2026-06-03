@@ -1,0 +1,58 @@
+{
+  "schema_version": "0.1",
+  "session": {
+    "session_id": "YYYY-MM-DD_camera_sample001",
+    "capture_date": "YYYY-MM-DD",
+    "contributor": "",
+    "operator_notes": ""
+  },
+  "camera": {
+    "brand": "",
+    "model": "",
+    "body_serial_hash": "",
+    "sample_id": "sample001",
+    "raw_format": "",
+    "raw_mode": "uncompressed",
+    "bit_depth": null
+  },
+  "lens": {
+    "brand": "",
+    "model": "",
+    "focal_length_mm": null,
+    "aperture": null
+  },
+  "screen": {
+    "brand": "",
+    "model": "",
+    "resolution": "",
+    "brightness_setting": "",
+    "hdr_disabled": true,
+    "auto_brightness_disabled": true,
+    "true_tone_or_equivalent_disabled": true,
+    "night_shift_or_equivalent_disabled": true
+  },
+  "pattern": {
+    "pattern_version": "DR_Grid_3.0",
+    "cols": 11,
+    "rows": 7,
+    "display_mode": "standard_grid"
+  },
+  "capture_protocol": {
+    "tripod_used": true,
+    "manual_exposure": true,
+    "manual_focus": true,
+    "intentional_defocus": true,
+    "dark_frames_same_settings_as_chart": true,
+    "room_light_controlled": true
+  },
+  "iso_series": [
+    {
+      "iso": 100,
+      "chart_files": [],
+      "dark_files": [],
+      "shutter": "",
+      "aperture": "",
+      "notes": ""
+    }
+  ]
+}
